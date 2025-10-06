@@ -3,7 +3,7 @@
 import requests
 from typing import Optional
 
-__version__ = "1.0.4"
+__version__ = "1.0.5"
 
 API_BASE_URL = "https://api.gpuniq.ru/v1"
 
