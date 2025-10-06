@@ -62,12 +62,24 @@ print(response)
 from gpuniq import GPUniqError
 
 try:
-    response = client.request("openai/gpt-oss-120b", "Hello!")
+    response = client.request("invalid-model", "Hello!")
     print(response)
 except GPUniqError as e:
     print(f"Ошибка: {e.message}")
     print(f"Код ошибки: {e.error_code}")
     print(f"HTTP статус: {e.http_status}")
+```
+
+**При использовании несуществующей модели автоматически выводится список доступных моделей:**
+
+```
+Ошибка: Несуществующая модель
+
+Доступные модели:
+  - zai-org/GLM-4.6
+  - openai/gpt-oss-120b
+  - Qwen/Qwen3-Coder-480B-A35B-Instruct
+  ...
 ```
 
 ---

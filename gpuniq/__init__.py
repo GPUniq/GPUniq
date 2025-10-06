@@ -7,6 +7,21 @@ __version__ = "0.1.1"
 
 API_BASE_URL = "https://api.gpuniq.ru/v1"
 
+AVAILABLE_MODELS = [
+    "zai-org/GLM-4.6",
+    "openai/gpt-oss-120b",
+    "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+    "Qwen/Qwen3-235B-A22B-Instruct-2507",
+    "Qwen/Qwen3-Next-80B-A3B-Instruct",
+    "Qwen/QwQ-32B",
+    "Qwen/Qwen2.5-Coder-32B-Instruct",
+    "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
+    "meta-llama/Llama-3.3-70B-Instruct",
+    "t-tech/T-lite-it-1.0",
+    "t-tech/T-pro-it-1.0",
+    "t-tech/T-pro-it-2.0",
+]
+
 
 class GPUniqError(Exception):
     """Base exception for GPUniq errors."""
@@ -83,6 +98,11 @@ class GPUniqClient:
                 error_data = data.get("data", {})
                 error_message = data.get("message", "Unknown error")
                 error_code = error_data.get("error_code")
+
+                # Add available models list for model-related errors
+                if error_code in ["INVALID_MODEL", "MODEL_NOT_AVAILABLE"]:
+                    models_list = "\n".join([f"  - {model}" for model in AVAILABLE_MODELS])
+                    error_message = f"{error_message}\n\nДоступные модели:\n{models_list}"
 
                 raise GPUniqError(
                     message=error_message,
