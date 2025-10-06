@@ -18,5 +18,5 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/kalinin-egor/GPUniq"
-Repository = "https://github.com/kalinin-egor/GPUniq"
+Homepage = "https://github.com/GPUniq/GPUniq"
+Repository = "https://github.com/GPUniq/GPUniq"
