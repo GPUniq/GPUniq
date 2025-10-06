@@ -1,24 +1,52 @@
-# GPUniq
+# Описание проекта
+**GPUniq**
+![PyPI Version](https://img.shields.io/pypi/v/GPUniq) ![License](https://img.shields.io/badge/license-MIT-blue)
 
-Python client for GPUniq LLM API.
+**GPUniq** — Python-клиент для доступа к GPUniq LLM API.
+Обеспечивает простое и удобное взаимодействие с различными языковыми моделями через единый интерфейс.
 
-## Installation
+📌 **Официальный сайт:** [gpuniq.ru](https://gpuniq.ru)
+
+---
+
+## 🚀 Возможности
+
+🤖 **Множество LLM-моделей** — доступ к OpenAI, GLM и другим моделям через единый API.
+💬 **Простой интерфейс** — всего пара строк кода для отправки запросов.
+⚡ **Быстрые запросы** — обработка запросов с настройкой таймаутов.
+🔐 **Безопасность** — аутентификация через API-ключи.
+📊 **Мониторинг токенов** — отслеживание использованных и оставшихся токенов.
+
+---
+
+## 📚 Установка
+
+Установите библиотеку через PyPI:
 
 ```bash
 pip install GPUniq
 ```
 
-## Usage
+---
 
-### Basic Example
+## 🛠️ Начало работы
+
+### 1️⃣ Инициализация клиента
+
+Подключите GPUniq к вашему проекту:
 
 ```python
 import gpuniq
 
-# Initialize client with your API key
+# Инициализация клиента с API-ключом
 client = gpuniq.init("gpuniq_your_api_key_here")
+```
 
-# Send a simple request
+### 2️⃣ Простой запрос к LLM
+
+Отправьте сообщение в языковую модель:
+
+```python
 response = client.request(
     "openai/gpt-oss-120b",
     "Привет, как дела?"
@@ -26,80 +54,70 @@ response = client.request(
 print(response)
 ```
 
-### Multi-turn Conversation
+### 3️⃣ Обработка ошибок
+
+Обрабатывайте ошибки API:
 
 ```python
-import gpuniq
-
-client = gpuniq.init("gpuniq_your_api_key_here")
-
-# Send multiple messages
-response = client.chat(
-    model="openai/gpt-oss-120b",
-    messages=[
-        {"role": "user", "content": "Привет!"},
-        {"role": "assistant", "content": "Здравствуйте! Чем могу помочь?"},
-        {"role": "user", "content": "Расскажи о GPUniq"}
-    ]
-)
-
-print(response['content'])
-print(f"Tokens used: {response['tokens_used']}")
-```
-
-### Error Handling
-
-```python
-import gpuniq
-
-client = gpuniq.init("gpuniq_your_api_key_here")
+from gpuniq import GPUniqError
 
 try:
     response = client.request("openai/gpt-oss-120b", "Hello!")
     print(response)
-except gpuniq.GPUniqError as e:
-    print(f"Error: {e.message}")
-    print(f"Error code: {e.error_code}")
-    print(f"HTTP status: {e.http_status}")
+except GPUniqError as e:
+    print(f"Ошибка: {e.message}")
+    print(f"Код ошибки: {e.error_code}")
+    print(f"HTTP статус: {e.http_status}")
 ```
 
-## API Reference
+---
 
-### `gpuniq.init(api_key: str) -> GPUniqClient`
+## 🛠️ API Методы
 
-Initialize and return a GPUniq client.
+| Метод | Описание |
+|-------|----------|
+| `init(api_key)` | Инициализирует клиент с API-ключом |
+| `request(model, message)` | Отправляет запрос к LLM |
 
-**Parameters:**
-- `api_key` (str): Your GPUniq API key (starts with 'gpuniq_')
+### Детальное описание методов
 
-**Returns:**
-- `GPUniqClient`: Initialized client instance
+#### `gpuniq.init(api_key: str) -> GPUniqClient`
+Инициализирует и возвращает клиент GPUniq.
 
-### `GPUniqClient.request(model: str, message: str, role: str = "user", timeout: int = 30) -> str`
+**Параметры:**
+- `api_key` (str): Ваш API-ключ GPUniq (начинается с 'gpuniq_')
 
-Send a simple request to the LLM.
+**Возвращает:**
+- `GPUniqClient`: Экземпляр клиента
 
-**Parameters:**
-- `model` (str): Model identifier (e.g., 'openai/gpt-oss-120b')
-- `message` (str): Message content to send
-- `role` (str, optional): Message role (default: 'user')
-- `timeout` (int, optional): Request timeout in seconds (default: 30)
+---
 
-**Returns:**
-- `str`: Response content from the LLM
+#### `GPUniqClient.request(model: str, message: str, role: str = "user", timeout: int = 30) -> str`
+Отправляет простой запрос к языковой модели.
 
-### `GPUniqClient.chat(model: str, messages: List[Dict[str, str]], timeout: int = 30) -> Dict[str, Any]`
+**Параметры:**
+- `model` (str): Идентификатор модели (например, 'openai/gpt-oss-120b')
+- `message` (str): Текст сообщения
+- `role` (str, опционально): Роль сообщения (по умолчанию: 'user')
+- `timeout` (int, опционально): Таймаут запроса в секундах (по умолчанию: 30)
 
-Send a multi-turn conversation to the LLM.
+**Возвращает:**
+- `str`: Ответ от языковой модели
 
-**Parameters:**
-- `model` (str): Model identifier
-- `messages` (List[Dict]): List of message dicts with 'role' and 'content' keys
-- `timeout` (int, optional): Request timeout in seconds (default: 30)
+---
 
-**Returns:**
-- `dict`: Full API response data including content, tokens_used, tokens_remaining, etc.
+## 🎯 Доступные модели
 
-## License
+- `openai/gpt-oss-120b`
+- `zai-org/GLM-4.6`
+- И другие...
 
-MIT
+---
+
+## 📝 Лицензия
+
+Этот проект распространяется под лицензией **MIT**.
+
+📌 **Официальный сайт:** [gpuniq.ru](https://gpuniq.ru)
+📌 **PyPI:** [GPUniq на PyPI](https://pypi.org/project/GPUniq/)
+📌 **GitHub:** [GPUniq на GitHub](https://github.com/GPUniq/GPUniq)

@@ -1,7 +1,7 @@
 """GPUniq - Python client for GPUniq LLM API."""
 
 import requests
-from typing import Optional, Dict, Any, List
+from typing import Optional
 
 __version__ = "0.1.1"
 
@@ -92,57 +92,6 @@ class GPUniqClient:
 
             # Extract content from successful response
             return data.get("data", {}).get("content", "")
-
-        except requests.exceptions.RequestException as e:
-            raise GPUniqError(f"Request failed: {str(e)}")
-
-    def chat(
-        self,
-        model: str,
-        messages: List[Dict[str, str]],
-        timeout: int = 30
-    ) -> Dict[str, Any]:
-        """Send a multi-turn conversation to GPUniq LLM API.
-
-        Args:
-            model: Model identifier (e.g., 'openai/gpt-oss-120b')
-            messages: List of message dicts with 'role' and 'content' keys
-            timeout: Request timeout in seconds (default: 30)
-
-        Returns:
-            dict: Full API response data
-
-        Raises:
-            GPUniqError: If the API request fails
-        """
-        url = f"{self.base_url}/llm/chat/completions"
-        headers = {
-            "X-API-Key": self.api_key,
-            "Content-Type": "application/json"
-        }
-
-        payload = {
-            "messages": messages,
-            "model": model
-        }
-
-        try:
-            response = requests.post(url, json=payload, headers=headers, timeout=timeout)
-            data = response.json()
-
-            # Check for API error
-            if data.get("exception", 0) != 0:
-                error_data = data.get("data", {})
-                error_message = data.get("message", "Unknown error")
-                error_code = error_data.get("error_code")
-
-                raise GPUniqError(
-                    message=error_message,
-                    error_code=error_code,
-                    http_status=response.status_code
-                )
-
-            return data.get("data", {})
 
         except requests.exceptions.RequestException as e:
             raise GPUniqError(f"Request failed: {str(e)}")
