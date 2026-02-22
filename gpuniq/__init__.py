@@ -1,135 +1,115 @@
-"""GPUniq - Python client for GPUniq LLM API."""
+"""GPUniq — Python SDK for GPUniq GPU Meta-Cloud platform.
 
-import requests
-from typing import Optional
+Usage::
 
-__version__ = "1.0.5"
+    from gpuniq import GPUniq
 
-API_BASE_URL = "https://api.gpuniq.ru/v1"
+    client = GPUniq(api_key="gpuniq_your_key_here")
 
-AVAILABLE_MODELS = [
-    "zai-org/GLM-4.6",
-    "openai/gpt-oss-120b",
-    "Qwen/Qwen3-Coder-480B-A35B-Instruct",
-    "Qwen/Qwen3-235B-A22B-Instruct-2507",
-    "Qwen/Qwen3-Next-80B-A3B-Instruct",
-    "Qwen/QwQ-32B",
-    "Qwen/Qwen2.5-Coder-32B-Instruct",
-    "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
-    "meta-llama/Llama-3.3-70B-Instruct",
-    "t-tech/T-lite-it-1.0",
-    "t-tech/T-pro-it-1.0",
-    "t-tech/T-pro-it-2.0",
+    # GPU Marketplace
+    gpus = client.marketplace.list(sort_by="price-low")
+    order = client.marketplace.create_order(agent_id=123, pricing_type="hour")
+
+    # Instances
+    instances = client.instances.list()
+    client.instances.start(task_id=456)
+
+    # Volumes
+    volumes = client.volumes.list()
+    client.volumes.create(name="my-data", size_limit_gb=20)
+
+    # LLM Chat
+    response = client.llm.chat("openai/gpt-oss-120b", "Hello!")
+
+    # GPU Cloud
+    client.gpu_cloud.deploy(gpu_name="RTX_4090")
+"""
+
+from ._client import DEFAULT_BASE_URL, HTTPClient
+from ._exceptions import (
+    AuthenticationError,
+    GPUniqError,
+    NotFoundError,
+    RateLimitError,
+    ValidationError,
+)
+from .burst import Burst
+from .gpu_cloud import GPUCloud
+from .instances import Instances
+from .llm import LLM
+from .marketplace import Marketplace
+from .payments import Payments
+from .settings import Settings
+from .volumes import Volumes
+
+__version__ = "2.0.0"
+__all__ = [
+    "GPUniq",
+    "GPUniqError",
+    "AuthenticationError",
+    "RateLimitError",
+    "NotFoundError",
+    "ValidationError",
+    "init",
 ]
 
 
-class GPUniqError(Exception):
-    """Base exception for GPUniq errors."""
-    def __init__(self, message: str, error_code: Optional[str] = None, http_status: Optional[int] = None):
-        self.message = message
-        self.error_code = error_code
-        self.http_status = http_status
-        super().__init__(self.message)
+class GPUniq:
+    """GPUniq SDK client.
 
+    Provides access to all GPUniq platform APIs through resource attributes.
 
-class GPUniqClient:
-    """Client for interacting with GPUniq LLM API."""
+    Args:
+        api_key: Your GPUniq API key (starts with "gpuniq_").
+        base_url: API base URL (default: https://api.gpuniq.com/v1).
+        timeout: Default request timeout in seconds (default: 60).
+    """
 
-    def __init__(self, api_key: str):
-        """Initialize GPUniq client.
-
-        Args:
-            api_key: Your GPUniq API key (starts with 'gpuniq_')
-        """
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        base_url: str = DEFAULT_BASE_URL,
+        timeout: int = 60,
+    ):
         if not api_key:
             raise ValueError("API key is required")
         if not api_key.startswith("gpuniq_"):
             raise ValueError("Invalid API key format. Key should start with 'gpuniq_'")
 
-        self.api_key = api_key
-        self.base_url = API_BASE_URL
+        self._http = HTTPClient(api_key=api_key, base_url=base_url, timeout=timeout)
 
+        self.marketplace = Marketplace(self._http)
+        self.instances = Instances(self._http)
+        self.volumes = Volumes(self._http)
+        self.burst = Burst(self._http)
+        self.payments = Payments(self._http)
+        self.settings = Settings(self._http)
+        self.llm = LLM(self._http)
+        self.gpu_cloud = GPUCloud(self._http)
+
+    # Backward compatibility with v1.x
     def request(
         self,
         model: str,
         message: str,
         role: str = "user",
-        timeout: int = 30
+        timeout: int = 30,
     ) -> str:
-        """Send a request to GPUniq LLM API.
+        """Send a simple LLM request (v1.x backward compatibility).
 
-        Args:
-            model: Model identifier (e.g., 'openai/gpt-oss-120b')
-            message: Message content to send
-            role: Message role (default: 'user')
-            timeout: Request timeout in seconds (default: 30)
-
-        Returns:
-            str: Response content from the LLM
-
-        Raises:
-            GPUniqError: If the API request fails
+        Use ``client.llm.chat()`` for new code.
         """
-        if not message:
-            raise ValueError("Message cannot be empty")
-
-        url = f"{self.base_url}/llm/chat/completions"
-        headers = {
-            "X-API-Key": self.api_key,
-            "Content-Type": "application/json"
-        }
-
-        payload = {
-            "messages": [
-                {
-                    "role": role,
-                    "content": message
-                }
-            ],
-            "model": model
-        }
-
-        try:
-            response = requests.post(url, json=payload, headers=headers, timeout=timeout)
-            data = response.json()
-
-            # Check for API error
-            if data.get("exception", 0) != 0:
-                error_data = data.get("data", {})
-                error_message = data.get("message", "Unknown error")
-                error_code = error_data.get("error_code")
-
-                # Add available models list for model-related errors
-                if error_code in ["INVALID_MODEL", "MODEL_NOT_AVAILABLE"]:
-                    models_list = "\n".join([f"  - {model}" for model in AVAILABLE_MODELS])
-                    error_message = f"{error_message}\n\nДоступные модели:\n{models_list}"
-
-                raise GPUniqError(
-                    message=error_message,
-                    error_code=error_code,
-                    http_status=response.status_code
-                )
-
-            # Extract content from successful response
-            return data.get("data", {}).get("content", "")
-
-        except requests.exceptions.RequestException as e:
-            raise GPUniqError(f"Request failed: {str(e)}")
+        return self.llm.chat(model, message, role=role, timeout=timeout)
 
 
-def init(api_key: str) -> GPUniqClient:
+# Backward compatibility: gpuniq.init("key") still works
+GPUniqClient = GPUniq
+
+
+def init(api_key: str) -> GPUniq:
     """Initialize and return a GPUniq client.
 
-    Args:
-        api_key: Your GPUniq API key (starts with 'gpuniq_')
-
-    Returns:
-        GPUniqClient: Initialized client instance
-
-    Example:
-        >>> import gpuniq
-        >>> client = gpuniq.init("gpuniq_your_key_here")
-        >>> response = client.request("openai/gpt-oss-120b", "Hello!")
-        >>> print(response)
+    Backward-compatible with v1.x. Equivalent to ``GPUniq(api_key=...)``.
     """
-    return GPUniqClient(api_key)
+    return GPUniq(api_key=api_key)

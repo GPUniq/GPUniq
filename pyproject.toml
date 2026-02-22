@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "GPUniq"
-version = "1.0.5"
-description = "Python client for GPUniq LLM API"
+version = "2.0.0"
+description = "Python SDK for GPUniq GPU Meta-Cloud platform"
 readme = "README.md"
-requires-python = ">=3.7"
+requires-python = ">=3.8"
 dependencies = [
     "requests>=2.25.0",
 ]
@@ -23,3 +23,4 @@ classifiers = [
 [project.urls]
 Homepage = "https://github.com/GPUniq/GPUniq"
 Repository = "https://github.com/GPUniq/GPUniq"
+Documentation = "https://github.com/GPUniq/GPUniq#readme"
