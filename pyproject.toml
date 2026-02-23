@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "GPUniq"
-version = "2.0.1"
+version = "3.0.1"
 description = "Python SDK for GPUniq GPU Meta-Cloud platform"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -19,6 +19,9 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
+
+[project.scripts]
+gg = "gpuniq.cli.main:main"
 
 [project.urls]
 Homepage = "https://github.com/GPUniq/GPUniq"
