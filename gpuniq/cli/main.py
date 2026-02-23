@@ -194,6 +194,51 @@ def cmd_logs(args):
                 sys.stdout.buffer.write(chunk)
 
 
+def cmd_replay(args):
+    gg_dir = args.gg_dir or DEFAULT_GG_DIR
+    cfg = _get_config(gg_dir)
+    store = _get_store(cfg)
+    checkpoints = store.get_checkpoints()
+
+    # Find unfinished commands (were running when VPS died)
+    replayable = [
+        cp for cp in checkpoints
+        if cp.get("status") in ("running", "killed")
+    ]
+
+    if not replayable:
+        print("[gg] No commands to replay.")
+        return
+
+    print(f"[gg] Found {len(replayable)} command(s) to replay:")
+    for cp in replayable:
+        print(f"  {cp['checkpoint_id'][:8]}... {cp['command']}")
+
+    replayed = 0
+    for cp in replayable:
+        command = cp["command"]
+        cwd = cp.get("working_dir", "/workspace")
+
+        # Mark old checkpoint as "replayed" so it won't be picked up again
+        store.update_checkpoint(cp["checkpoint_id"], {"status": "replayed"})
+
+        # Spawn detached gg process — it handles its own log capture via PTY
+        import subprocess
+        subprocess.Popen(
+            f"gg {command}",
+            shell=True,
+            cwd=cwd,
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        replayed += 1
+        print(f"[gg] Replayed: {command}")
+
+    print(f"[gg] {replayed} command(s) replayed in background.")
+
+
 def cmd_status(args):
     gg_dir = args.gg_dir or DEFAULT_GG_DIR
     cfg = _get_config(gg_dir)
@@ -243,11 +288,14 @@ def main():
     logs_parser.add_argument("checkpoint_id", help="Checkpoint ID (or prefix)")
     logs_parser.add_argument("--tail", type=int, default=None, help="Show last N lines")
 
+    # gg replay
+    subparsers.add_parser("replay", help="Re-run unfinished commands from previous session")
+
     # gg status
     subparsers.add_parser("status", help="Show gg status and config")
 
     # If first arg is not a known subcommand, treat everything as a command to run
-    known_subcommands = {"init", "list", "logs", "status", "-h", "--help", "--gg-dir"}
+    known_subcommands = {"init", "list", "logs", "status", "replay", "-h", "--help", "--gg-dir"}
 
     if len(sys.argv) > 1 and sys.argv[1] not in known_subcommands:
         # Build a namespace manually for the run command
@@ -276,6 +324,8 @@ def main():
         cmd_list(args)
     elif args.subcommand == "logs":
         cmd_logs(args)
+    elif args.subcommand == "replay":
+        cmd_replay(args)
     elif args.subcommand == "status":
         cmd_status(args)
     else:
