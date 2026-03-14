@@ -9,6 +9,7 @@ DEFAULT_API_URL = "https://api.gpuniq.com/v1"
 
 CONFIG_FILENAME = "config.json"
 MANIFEST_FILENAME = "checkpoints.json"
+SERVICES_FILENAME = "services.json"
 LOGS_DIR = "logs"
 
 
@@ -19,6 +20,7 @@ class GGConfig:
         self.gg_dir = gg_dir
         self.config_path = os.path.join(gg_dir, CONFIG_FILENAME)
         self.manifest_path = os.path.join(gg_dir, MANIFEST_FILENAME)
+        self.services_path = os.path.join(gg_dir, SERVICES_FILENAME)
         self.logs_dir = os.path.join(gg_dir, LOGS_DIR)
 
     def exists(self) -> bool:

@@ -7,6 +7,7 @@ from datetime import datetime
 from gpuniq.cli.api import CheckpointAPI
 from gpuniq.cli.config import DEFAULT_API_URL, DEFAULT_GG_DIR, GGConfig
 from gpuniq.cli.runner import CommandRunner
+from gpuniq.cli.services import ServiceStore
 from gpuniq.cli.store import CommandStore
 
 
@@ -24,6 +25,10 @@ def _get_config(gg_dir: str) -> GGConfig:
 
 def _get_store(cfg: GGConfig) -> CommandStore:
     return CommandStore(cfg.manifest_path, cfg.logs_dir)
+
+
+def _get_services(cfg: GGConfig) -> ServiceStore:
+    return ServiceStore(cfg.services_path)
 
 
 def _get_api(cfg: GGConfig) -> CheckpointAPI:
@@ -64,6 +69,7 @@ def cmd_run(args):
     gg_dir = args.gg_dir or DEFAULT_GG_DIR
     cfg = _get_config(gg_dir)
     store = _get_store(cfg)
+    services = _get_services(cfg)
     api = _get_api(cfg)
     runner = CommandRunner(cfg.logs_dir)
 
@@ -71,6 +77,11 @@ def cmd_run(args):
     if not command.strip():
         print("Error: no command specified.", file=sys.stderr)
         sys.exit(1)
+
+    # Register as persistent service (auto-restart on GPU replacement)
+    cwd = os.getcwd()
+    svc = services.add(command, cwd)
+    print(f"[gg] Registered service {svc['id']}: {command} (dir: {cwd})")
 
     # Prepare env snapshot (selected vars)
     env_keys = ["PATH", "CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES", "HOME", "USER"]
@@ -258,6 +269,88 @@ def cmd_status(args):
     print(f"Total logs:   {size_mb:.1f} MB")
 
 
+def cmd_services(args):
+    """List or remove persistent services."""
+    gg_dir = args.gg_dir or DEFAULT_GG_DIR
+    cfg = _get_config(gg_dir)
+    services = _get_services(cfg)
+
+    action = getattr(args, "services_action", None)
+
+    if action == "rm":
+        if services.remove(args.service_id):
+            print(f"[gg] Removed service {args.service_id}")
+        else:
+            print(f"Error: no service matching '{args.service_id}'", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if action == "clear":
+        count = services.clear()
+        print(f"[gg] Cleared {count} service(s)")
+        return
+
+    # Default: list
+    entries = services.get_all()
+    if not entries:
+        print("No persistent services registered. Run a command with: gg <command>")
+        return
+
+    header = f"{'ID':<10} {'DIR':<30} {'COMMAND'}"
+    print(header)
+    print("-" * len(header))
+    for svc in entries:
+        cmd = svc["command"]
+        if len(cmd) > 50:
+            cmd = cmd[:47] + "..."
+        d = svc["working_dir"]
+        if len(d) > 28:
+            d = "..." + d[-25:]
+        print(f"{svc['id']:<10} {d:<30} {cmd}")
+
+
+def cmd_restart(args):
+    """Restart all registered persistent services in background."""
+    gg_dir = args.gg_dir or DEFAULT_GG_DIR
+    cfg = _get_config(gg_dir)
+    services = _get_services(cfg)
+    store = _get_store(cfg)
+    entries = services.get_all()
+
+    if not entries:
+        print("[gg] No services to restart.")
+        return
+
+    # Mark any running/killed checkpoints as "replayed" to prevent
+    # gg replay from starting them again (restart is the superset)
+    checkpoints = store.get_checkpoints()
+    for cp in checkpoints:
+        if cp.get("status") in ("running", "killed"):
+            store.update_checkpoint(cp["checkpoint_id"], {"status": "replayed"})
+
+    print(f"[gg] Restarting {len(entries)} service(s):")
+    import subprocess
+
+    started = 0
+    for svc in entries:
+        command = svc["command"]
+        cwd = svc.get("working_dir", "/workspace")
+
+        print(f"  [{svc['id']}] {command} (dir: {cwd})")
+        subprocess.Popen(
+            f"gg {command}",
+            shell=True,
+            cwd=cwd,
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        started += 1
+
+    print(f"[gg] {started} service(s) restarted in background.")
+
+
 # ─── Main entry point ───────────────────────────────────────────────────────
 
 
@@ -294,8 +387,22 @@ def main():
     # gg status
     subparsers.add_parser("status", help="Show gg status and config")
 
+    # gg services [list|rm|clear]
+    services_parser = subparsers.add_parser("services", help="Manage persistent services")
+    services_sub = services_parser.add_subparsers(dest="services_action")
+    services_sub.add_parser("list", help="List registered services (default)")
+    rm_parser = services_sub.add_parser("rm", help="Remove a service by ID")
+    rm_parser.add_argument("service_id", help="Service ID (or prefix)")
+    services_sub.add_parser("clear", help="Remove all services")
+
+    # gg restart
+    subparsers.add_parser("restart", help="Restart all registered persistent services")
+
     # If first arg is not a known subcommand, treat everything as a command to run
-    known_subcommands = {"init", "list", "logs", "status", "replay", "-h", "--help", "--gg-dir"}
+    known_subcommands = {
+        "init", "list", "logs", "status", "replay", "services", "restart",
+        "-h", "--help", "--gg-dir",
+    }
 
     if len(sys.argv) > 1 and sys.argv[1] not in known_subcommands:
         # Build a namespace manually for the run command
@@ -328,6 +435,12 @@ def main():
         cmd_replay(args)
     elif args.subcommand == "status":
         cmd_status(args)
+    elif args.subcommand == "services":
+        if not args.services_action or args.services_action == "list":
+            args.services_action = None  # trigger default list
+        cmd_services(args)
+    elif args.subcommand == "restart":
+        cmd_restart(args)
     else:
         parser.print_help()
 
