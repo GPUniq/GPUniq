@@ -2,9 +2,9 @@
 
 ![PyPI Version](https://img.shields.io/pypi/v/GPUniq) ![License](https://img.shields.io/badge/license-MIT-blue)
 
-**GPUniq** is a Python SDK for the [GPUniq](https://gpuniq.com) GPU Meta-Cloud platform.
+**GPUniq** is a Python SDK and CLI for the [GPUniq](https://gpuniq.com) GPU Meta-Cloud platform.
 
-GPUniq aggregates GPU capacity from multiple providers into a single platform with automatic provider selection, failover mechanisms, and a snapshot system. Access thousands of GPUs through three deployment modes and a built-in LLM API.
+GPUniq aggregates GPU capacity from multiple providers into a single platform with automatic provider selection, failover mechanisms, and persistent storage. Access thousands of GPUs through three deployment modes, a built-in LLM API, and a CLI for command checkpointing.
 
 ## Installation
 
@@ -125,7 +125,7 @@ status = client.marketplace.get_order_status(deploy["job_id"])
 
 ### GPU Burst
 
-**Scale to many GPUs with automatic failback.** Burst mode provisions multiple GPUs across multiple machines simultaneously. If your primary GPU type isn't available, the system automatically falls back to alternative GPU types you specify. Best for distributed training, batch inference, and workloads that need to scale fast.
+**Scale to many GPUs with automatic fallback.** Burst mode provisions multiple GPUs across multiple machines simultaneously. If your primary GPU type isn't available, the system automatically falls back to alternative GPU types you specify. Best for distributed training, batch inference, and workloads that need to scale fast.
 
 Key features:
 - Request up to 100 GPUs in a single order
@@ -221,7 +221,7 @@ client.instances.cancel_pending_job(job_id="abc-123")
 
 ## Volumes
 
-Persistent storage that survives instance restarts and can be attached to any instance.
+Persistent S3-backed storage that automatically syncs between your GPU instance and the cloud. Data in `/workspace/` and `/root/` is synced via rclone — your files, configs, and project data survive instance restarts and replacements.
 
 ```python
 # Pricing
@@ -234,37 +234,66 @@ vol = client.volumes.create(name="my-dataset", size_limit_gb=50, description="Tr
 volumes = client.volumes.list()
 archived = client.volumes.list_archived()
 
-# Upload files
-client.volumes.upload(volume_id=1, file_path="/local/data.tar.gz", subpath="datasets/")
+# Attach to an instance at deploy time
+deploy = client.gpu_cloud.deploy(
+    gpu_name="RTX_4090",
+    docker_image="pytorch/pytorch:latest",
+    volume_id=vol["id"],
+)
 
-# Browse files
-files = client.volumes.list_files(volume_id=1, subpath="datasets/")
-
-# Download
-content = client.volumes.download(volume_id=1, path="datasets/data.tar.gz")
-client.volumes.download_to(volume_id=1, remote_path="datasets/data.tar.gz", local_path="./data.tar.gz")
-
-# Delete a file
-client.volumes.delete_file(volume_id=1, path="datasets/old.tar.gz")
+# View sync logs
+logs = client.volumes.sync_logs(volume_id=1)
+client.volumes.cancel_sync(log_id=5)
 
 # Update / delete volume
 client.volumes.update(volume_id=1, size_limit_gb=100)
 client.volumes.delete(volume_id=1)
-
-# Sync logs
-logs = client.volumes.sync_logs(volume_id=1)
-client.volumes.cancel_sync(log_id=5)
 ```
+
+---
+
+## CLI — `gg`
+
+The `gg` CLI runs on your GPU instance and provides command checkpointing and persistent services. Commands registered with `gg` are automatically restarted when your instance is replaced (e.g. during auto-recovery).
+
+```bash
+# Initialize (done automatically on deploy)
+gg init <token>
+
+# Run a command with checkpointing
+gg python train.py --epochs 100
+gg bash run_pipeline.sh
+
+# List checkpoints
+gg list
+
+# View logs for a checkpoint
+gg logs <checkpoint_id>
+gg logs <checkpoint_id> --tail 50
+
+# Show status
+gg status
+
+# Manage persistent services
+gg services           # list registered services
+gg services rm <id>   # remove a service
+gg services clear     # remove all
+
+# Restart all services (used during auto-recovery)
+gg restart
+```
+
+When you run `gg <command>`, the command is registered as a persistent service. If your GPU instance is replaced (hardware failure, auto-recovery), the platform syncs your volume and runs `gg restart` to resume all registered services.
 
 ---
 
 ## LLM API
 
-Access multiple LLM models (OpenAI, Qwen, DeepSeek, GLM, Llama, and more) through a unified API.
+Access multiple LLM models through a unified API.
 
 ```python
 # Simple request
-response = client.llm.chat("openai/gpt-oss-120b", "Explain transformers")
+response = client.llm.chat("openai/gpt-4o-mini", "Explain transformers")
 print(response)  # string
 
 # Full chat completion with message history
@@ -273,7 +302,7 @@ data = client.llm.chat_completion(
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "Hello!"},
     ],
-    model="openai/gpt-oss-120b",
+    model="openai/gpt-4o-mini",
     temperature=0.7,
     max_tokens=1000,
 )
@@ -285,13 +314,12 @@ models = client.llm.models()
 balance = client.llm.balance()
 packages = client.llm.packages()
 client.llm.purchase_tokens(package_type="medium")
-client.llm.convert_rubles_to_tokens(ruble_amount=100, tokens_to_add=50000)
 
 # Usage history
 history = client.llm.usage_history(limit=50)
 
 # Persistent chat sessions
-session = client.llm.create_chat_session(model="openai/gpt-oss-120b", title="My Chat")
+session = client.llm.create_chat_session(model="openai/gpt-4o-mini", title="My Chat")
 reply = client.llm.send_message(chat_id=session["id"], message="Hello!")
 sessions = client.llm.list_chat_sessions()
 client.llm.delete_chat_session(chat_id=session["id"])
@@ -305,12 +333,8 @@ cmds = client.llm.generate_commands("find all Python files larger than 1MB")
 ## Payments
 
 ```python
-# Deposit via YooKassa
-deposit = client.payments.deposit(amount=1000, payment_system="yookassa")
-print(deposit["confirmation_url"])  # redirect user here
-
 # Deposit via Stripe
-intent = client.payments.create_stripe_intent(amount=1000)
+intent = client.payments.create_stripe_intent(amount=50)
 client.payments.check_stripe_payment(payment_id="pi_xxx")
 
 # History
@@ -374,7 +398,7 @@ v1.x code continues to work:
 import gpuniq
 
 client = gpuniq.init("gpuniq_your_key")
-response = client.request("openai/gpt-oss-120b", "Hello!")
+response = client.request("openai/gpt-4o-mini", "Hello!")
 ```
 
 ## License
