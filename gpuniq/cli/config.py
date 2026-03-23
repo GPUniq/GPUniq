@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 
-DEFAULT_GG_DIR = "/workspace/volume/.gg"
+DEFAULT_GG_DIR = "/workspace/.gg"
 DEFAULT_API_URL = "https://api.gpuniq.com/v1"
 
 CONFIG_FILENAME = "config.json"

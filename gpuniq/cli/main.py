@@ -11,9 +11,35 @@ from gpuniq.cli.services import ServiceStore
 from gpuniq.cli.store import CommandStore
 
 
+def _try_auto_init(gg_dir: str) -> bool:
+    """Auto-initialize from GG_TOKEN env var if config doesn't exist."""
+    token = os.environ.get("GG_TOKEN")
+    if not token:
+        return False
+
+    api_url = os.environ.get("GG_API_URL", DEFAULT_API_URL)
+    api = CheckpointAPI(api_url, token)
+    result = api.verify_token()
+    if not result:
+        print("[gg] Warning: GG_TOKEN is set but token verification failed.", file=sys.stderr)
+        return False
+
+    cfg = GGConfig(gg_dir)
+    cfg.save(
+        token=token,
+        api_base_url=api_url,
+        task_id=result["task_id"],
+        instance_name=result.get("instance_name"),
+    )
+    print(f"[gg] Auto-initialized for task {result['task_id']}", file=sys.stderr)
+    return True
+
+
 def _get_config(gg_dir: str) -> GGConfig:
     cfg = GGConfig(gg_dir)
     if not cfg.exists():
+        if _try_auto_init(gg_dir):
+            return cfg
         print(
             f"Error: gg not initialized.\n"
             f"Run: gg init <token>",
