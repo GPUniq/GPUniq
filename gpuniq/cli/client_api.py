@@ -1,0 +1,190 @@
+import sys
+from typing import List, Optional
+
+import requests
+
+
+class ClientAPI:
+    """HTTP client for GPUniq API using API key authentication (X-API-Key)."""
+
+    def __init__(self, base_url: str, api_key: str, timeout: int = 15):
+        self.base_url = base_url.rstrip("/")
+        self.session = requests.Session()
+        self.session.headers["X-API-Key"] = api_key
+        self.session.headers["Content-Type"] = "application/json"
+        self.timeout = timeout
+
+    def verify_key(self) -> Optional[dict]:
+        """Verify API key by fetching instances. Returns user info or None."""
+        try:
+            resp = self.session.get(
+                f"{self.base_url}/instances/my?page=1&page_size=1",
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            print(f"[gg] Error: API key verification failed: {e}", file=sys.stderr)
+            return None
+
+    def get_instances(self, page: int = 1, page_size: int = 50) -> Optional[dict]:
+        """Get user's rented instances with SSH connection data."""
+        try:
+            resp = self.session.get(
+                f"{self.base_url}/instances/my?page={page}&page_size={page_size}",
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            return resp.json().get("data", {})
+        except Exception as e:
+            print(f"[gg] Error: could not fetch instances: {e}", file=sys.stderr)
+            return None
+
+    def get_instance_ssh_keys(self, instance_id: int) -> Optional[List[dict]]:
+        """Get SSH keys attached to an instance."""
+        try:
+            resp = self.session.get(
+                f"{self.base_url}/instances/{instance_id}/ssh-keys",
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            data = resp.json().get("data", {})
+            return data.get("ssh_keys", [])
+        except Exception as e:
+            print(f"[gg] Warning: could not fetch SSH keys: {e}", file=sys.stderr)
+            return None
+
+    def attach_ssh_key(self, instance_id: int, key_id: int) -> bool:
+        """Attach an SSH key to an instance."""
+        try:
+            resp = self.session.post(
+                f"{self.base_url}/instances/{instance_id}/ssh-keys",
+                json={"ssh_key_id": key_id},
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            return True
+        except Exception as e:
+            print(f"[gg] Warning: could not attach SSH key: {e}", file=sys.stderr)
+            return False
+
+    def stop_instance(self, task_id: int) -> Optional[dict]:
+        """Stop a running instance."""
+        try:
+            resp = self.session.post(
+                f"{self.base_url}/instances/{task_id}/stop",
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json().get("data", {})
+        except Exception as e:
+            print(f"[gg] Error: could not stop instance: {e}", file=sys.stderr)
+            return None
+
+    # ─── SSH Keys (account-level) ────────────────────────────────────────────
+
+    def list_ssh_keys(self) -> Optional[List[dict]]:
+        """List user's SSH keys."""
+        try:
+            resp = self.session.get(
+                f"{self.base_url}/settings/ssh-keys",
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            data = resp.json().get("data", {})
+            return data.get("ssh_keys", [])
+        except Exception as e:
+            print(f"[gg] Error: could not fetch SSH keys: {e}", file=sys.stderr)
+            return None
+
+    def add_ssh_key(self, key_name: str, public_key: str) -> Optional[dict]:
+        """Add an SSH public key to the account."""
+        try:
+            resp = self.session.post(
+                f"{self.base_url}/settings/ssh-keys",
+                json={"key_name": key_name, "public_key": public_key},
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            return resp.json().get("data", {})
+        except requests.exceptions.HTTPError as e:
+            detail = ""
+            try:
+                detail = e.response.json().get("detail", "")
+            except Exception:
+                pass
+            if "already exists" in str(detail).lower() or "duplicate" in str(detail).lower():
+                print(f"[gg] This SSH key is already in your account.", file=sys.stderr)
+            else:
+                print(f"[gg] Error: could not add SSH key: {detail or e}", file=sys.stderr)
+            return None
+        except Exception as e:
+            print(f"[gg] Error: could not add SSH key: {e}", file=sys.stderr)
+            return None
+
+    def delete_ssh_key(self, key_id: int) -> bool:
+        """Delete an SSH key from the account."""
+        try:
+            resp = self.session.delete(
+                f"{self.base_url}/settings/ssh-keys/{key_id}",
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            return True
+        except Exception as e:
+            print(f"[gg] Error: could not delete SSH key: {e}", file=sys.stderr)
+            return False
+
+    # ─── Volumes ─────────────────────────────────────────────────────────────
+
+    def list_volumes(self) -> Optional[List[dict]]:
+        """List user's volumes."""
+        try:
+            resp = self.session.get(
+                f"{self.base_url}/volumes/",
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            data = resp.json().get("data", [])
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            print(f"[gg] Error: could not fetch volumes: {e}", file=sys.stderr)
+            return None
+
+    def create_volume(self, name: str, size_limit_gb: float = 10.0, description: str = None) -> Optional[dict]:
+        """Create a new volume."""
+        body = {"name": name, "size_limit_gb": size_limit_gb}
+        if description:
+            body["description"] = description
+        try:
+            resp = self.session.post(
+                f"{self.base_url}/volumes/",
+                json=body,
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            return resp.json().get("data", {})
+        except requests.exceptions.HTTPError as e:
+            detail = ""
+            try:
+                detail = e.response.json().get("detail", "")
+            except Exception:
+                pass
+            print(f"[gg] Error: could not create volume: {detail or e}", file=sys.stderr)
+            return None
+        except Exception as e:
+            print(f"[gg] Error: could not create volume: {e}", file=sys.stderr)
+            return None
+
+    def delete_volume(self, volume_id: int) -> bool:
+        """Delete a volume."""
+        try:
+            resp = self.session.delete(
+                f"{self.base_url}/volumes/{volume_id}",
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            return True
+        except Exception as e:
+            print(f"[gg] Error: could not delete volume: {e}", file=sys.stderr)
+            return False

@@ -254,7 +254,44 @@ client.volumes.delete(volume_id=1)
 
 ## CLI — `gg`
 
-The `gg` CLI runs on your GPU instance and provides command checkpointing and persistent services. Commands registered with `gg` are automatically restarted when your instance is replaced (e.g. during auto-recovery).
+The `gg` CLI has two modes:
+
+1. **Client mode** — runs on your local machine (macOS, Linux, Windows). Manage instances, SSH connections, volumes, and SSH keys from your terminal.
+2. **GPU mode** — runs on the GPU instance itself. Command checkpointing and persistent services.
+
+### Client Commands (your machine)
+
+```bash
+# Authenticate with your API key
+gg login
+
+# View your balance
+gg balance
+
+# List rented GPU instances
+gg orders
+
+# SSH into an instance (interactive selection if multiple)
+gg open
+gg open 142           # connect to specific instance
+
+# Stop an instance
+gg stop
+gg stop 142
+
+# Manage SSH keys in your account
+gg ssh-keys list
+gg ssh-keys add       # upload ~/.ssh/id_*.pub to GPUniq
+
+# Manage persistent volumes
+gg volumes            # list volumes
+gg volumes create my-data --size 50
+gg volumes delete 7
+```
+
+When you run `gg open`, the CLI automatically detects your local SSH key and offers to attach it to the instance.
+
+### GPU Commands (on the instance)
 
 ```bash
 # Initialize (done automatically on deploy)
