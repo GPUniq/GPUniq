@@ -23,6 +23,7 @@ classifiers = [
 
 [project.scripts]
 gg = "gpuniq.cli.main:main"
+gpuniq = "gpuniq.cli.main:main"
 
 [project.urls]
 Homepage = "https://github.com/GPUniq/GPUniq"

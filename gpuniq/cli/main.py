@@ -394,7 +394,9 @@ def _get_client_config() -> ClientConfig:
 
 def _get_client_api(cfg: ClientConfig) -> ClientAPI:
     data = cfg.load()
-    return ClientAPI(data["api_base_url"], data["api_key"])
+    api = ClientAPI(data["api_base_url"], data["api_key"])
+    api.send_heartbeat()
+    return api
 
 
 def _find_local_ssh_pubkeys() -> list:

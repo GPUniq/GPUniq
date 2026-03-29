@@ -22,10 +22,27 @@ class ClientAPI:
                 timeout=self.timeout,
             )
             resp.raise_for_status()
+            self.send_heartbeat()
             return resp.json()
         except Exception as e:
             print(f"[gg] Error: API key verification failed: {e}", file=sys.stderr)
             return None
+
+    def send_heartbeat(self) -> None:
+        """Send heartbeat to backend so the web UI knows CLI is connected."""
+        try:
+            from importlib.metadata import version as pkg_version
+            cli_version = pkg_version("gpuniq")
+        except Exception:
+            cli_version = "unknown"
+        try:
+            self.session.post(
+                f"{self.base_url}/cli/heartbeat",
+                json={"version": cli_version},
+                timeout=5,
+            )
+        except Exception:
+            pass  # non-critical, don't block CLI
 
     def get_instances(self, page: int = 1, page_size: int = 50) -> Optional[dict]:
         """Get user's rented instances with SSH connection data."""
