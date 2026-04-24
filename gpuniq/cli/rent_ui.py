@@ -276,50 +276,105 @@ class RentFlow:
         parts.append(f"sort: {self.sort_by}")
         return "  ·  ".join(parts)
 
+    # Column widths for everything except GPU model + LOCATION, which flex.
+    # Tuples are (key, header, width, align)  — align: '<' left, '>' right.
+    _FIXED_COLS: List[Tuple[str, str, int, str]] = [
+        ("idx",    "#",      4,  ">"),
+        # gpu flex
+        ("cnt",    "CNT",    4,  ">"),
+        ("vram",   "VRAM",   7,  ">"),
+        ("ram",    "RAM",    7,  ">"),
+        ("disk",   "DISK",   8,  ">"),
+        ("cpu",    "CPU",    4,  ">"),
+        ("net",    "NET ↓/↑",    16, ">"),
+        # location flex
+        ("relia",  "RELIA",  6,  ">"),
+        ("price",  "PRICE",  11, ">"),
+        ("verif",  "VER",    3,  "<"),
+    ]
+
     def _build_table(self, agents: List[dict], width: int) -> str:
-        # Fixed column widths
-        w_idx, w_cnt, w_vram, w_price, w_verif = 4, 5, 9, 13, 3
         gap = 1
-        fixed = w_idx + w_cnt + w_vram + w_price + w_verif + gap * 6
-        remaining = max(40, width - fixed)
-        w_gpu = int(remaining * 0.60)
-        w_loc = remaining - w_gpu
+        fixed_total = sum(c[2] for c in self._FIXED_COLS)
+        total_cols = len(self._FIXED_COLS) + 2  # +2 flex cols (gpu, location)
+        gaps_total = gap * (total_cols - 1)
+        remaining = max(30, width - fixed_total - gaps_total)
+        w_gpu = max(12, int(remaining * 0.58))
+        w_loc = max(8, remaining - w_gpu)
 
-        header = self._row(
-            "#", "GPU", "CNT", "VRAM", "LOCATION", "PRICE", "VER",
-            w_idx, w_gpu, w_cnt, w_vram, w_loc, w_price, w_verif,
-        )
-        sep = rule("─", len(header))
-
-        lines = [header, sep]
+        lines = [self._header_row(w_gpu, w_loc), rule("─", width)]
         for i, a in enumerate(agents, 1):
-            gpu = str(a.get("gpu_model") or "Unknown")
-            cnt = str(a.get("gpu_count") or 1)
-            vram_gb = a.get("vram_gb") or 0
-            vram = f"{vram_gb} GB" if vram_gb else "—"
-            loc = str(a.get("location") or "—")
-            price = fmt_price(a.get("price_per_hour"))
-            verif = "✓" if a.get("verified") else "·"
-            lines.append(self._row(
-                str(i), gpu, cnt, vram, loc, price, verif,
-                w_idx, w_gpu, w_cnt, w_vram, w_loc, w_price, w_verif,
-            ))
+            lines.append(self._data_row(i, a, w_gpu, w_loc))
         return "\n".join(lines)
 
+    def _header_row(self, w_gpu: int, w_loc: int) -> str:
+        fields = {key: (header, align) for key, header, _, align in self._FIXED_COLS}
+        return self._compose_row({
+            **{key: fields[key][0] for key in fields},
+            "gpu": "GPU",
+            "location": "LOCATION",
+        }, w_gpu, w_loc)
+
+    def _data_row(self, i: int, a: dict, w_gpu: int, w_loc: int) -> str:
+        return self._compose_row({
+            "idx":      str(i),
+            "gpu":      str(a.get("gpu_model") or "Unknown"),
+            "cnt":      str(a.get("gpu_count") or 1),
+            "vram":     self._gb(a.get("vram_gb")),
+            "ram":      self._gb(a.get("ram_gb")),
+            "disk":     self._gb(a.get("storage_gb")),
+            "cpu":      str(a.get("cpu_count") or "—"),
+            "net":      self._net(a.get("down_mbps"), a.get("up_mbps")),
+            "location": str(a.get("location") or "—"),
+            "relia":    self._pct(a.get("reliability")),
+            "price":    fmt_price(a.get("price_per_hour")),
+            "verif":    "✓" if a.get("verified") else "·",
+        }, w_gpu, w_loc)
+
+    def _compose_row(self, values: Dict[str, str], w_gpu: int, w_loc: int) -> str:
+        parts: List[str] = []
+        for key, _header, width, align in self._FIXED_COLS:
+            v = values.get(key, "")
+            parts.append(f"{truncate(v, width):{align}{width}}")
+            if key == "idx":
+                parts.append(f"{truncate(values.get('gpu', ''), w_gpu):<{w_gpu}}")
+            if key == "net":
+                parts.append(f"{truncate(values.get('location', ''), w_loc):<{w_loc}}")
+        return " ".join(parts)
+
+    # ── Cell formatters ─────────────────────────────────────────────────
+
     @staticmethod
-    def _row(
-        idx, gpu, cnt, vram, loc, price, verif,
-        w_idx, w_gpu, w_cnt, w_vram, w_loc, w_price, w_verif,
-    ) -> str:
-        return (
-            f"{idx:>{w_idx}} "
-            f"{truncate(gpu, w_gpu):<{w_gpu}} "
-            f"{cnt:>{w_cnt}} "
-            f"{vram:>{w_vram}} "
-            f"{truncate(loc, w_loc):<{w_loc}} "
-            f"{price:>{w_price}} "
-            f"{verif:<{w_verif}}"
-        )
+    def _gb(value: Any) -> str:
+        try:
+            n = int(value or 0)
+        except (TypeError, ValueError):
+            return "—"
+        return f"{n} GB" if n else "—"
+
+    @staticmethod
+    def _net(down: Any, up: Any) -> str:
+        def _n(x):
+            try:
+                return int(x or 0)
+            except (TypeError, ValueError):
+                return 0
+        d, u = _n(down), _n(up)
+        if not d and not u:
+            return "—"
+        return f"{d}/{u} Mbps"
+
+    @staticmethod
+    def _pct(value: Any) -> str:
+        try:
+            n = float(value or 0)
+        except (TypeError, ValueError):
+            return "—"
+        if n <= 0:
+            return "—"
+        if n <= 1:  # 0–1 scale
+            n *= 100
+        return f"{n:.1f}%"
 
     # ── Action prompt ───────────────────────────────────────────────────
 
