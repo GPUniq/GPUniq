@@ -4,6 +4,17 @@ from typing import List, Optional
 import requests
 
 
+class OrderOfferGone(Exception):
+    """Raised when POST /marketplace/order returns 410 — offer is no longer available
+    (another user rented it, or the provider removed it). Callers typically handle this
+    by letting the user pick a different offer."""
+
+    def __init__(self, message: str, agent_id):
+        super().__init__(message)
+        self.message = message
+        self.agent_id = agent_id
+
+
 class ClientAPI:
     """HTTP client for GPUniq API using API key authentication (X-API-Key)."""
 
@@ -289,11 +300,27 @@ class ClientAPI:
             resp.raise_for_status()
             return resp.json().get("data", {})
         except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else None
             detail = ""
             try:
                 detail = e.response.json().get("detail", "")
             except Exception:
                 pass
+
+            # 410 Gone — the specific offer was snapped up or removed between
+            # listing and ordering. Let the caller offer an "try another" retry.
+            if status == 410:
+                message = detail
+                if isinstance(detail, dict):
+                    message = detail.get("message") or detail.get("message_ru") or ""
+                raise OrderOfferGone(
+                    message or "This GPU offer is no longer available.",
+                    agent_id,
+                ) from e
+
+            # Other error — print and return None as before.
+            if isinstance(detail, dict):
+                detail = detail.get("message") or detail.get("detail") or str(detail)
             print(f"[gg] Error: order failed: {detail or e}", file=sys.stderr)
             return None
         except Exception as e:

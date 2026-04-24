@@ -118,7 +118,39 @@ class RentFlow:
 
         self._page: int = 1
 
-    # ── Public entry point ──────────────────────────────────────────────
+    # ── Public entry points ─────────────────────────────────────────────
+
+    def seed(
+        self,
+        *,
+        gpu_model: Optional[str] = None,
+        min_count: Optional[int] = None,
+        max_price: Optional[float] = None,
+        verified_only: bool = False,
+        sort_by: Optional[str] = None,
+    ) -> None:
+        """Apply initial filters from CLI flags. Does not prompt."""
+        self.gpu_model = gpu_model
+        self.min_count = min_count
+        self.max_price = max_price
+        self.verified_only = bool(verified_only)
+        if sort_by:
+            self.sort_by = sort_by
+        self._seeded_from_flags = any(
+            [gpu_model, min_count, max_price, verified_only, sort_by]
+        )
+        self._wizard_done = False
+
+    def run_next(self) -> Optional[Dict[str, Any]]:
+        """Let the user pick one agent from the marketplace.
+        On first call, may run the filter wizard. Returns picked agent or None."""
+        if (
+            not getattr(self, "_seeded_from_flags", False)
+            and not getattr(self, "_wizard_done", False)
+        ):
+            self._filter_wizard()
+            self._wizard_done = True
+        return self._browse_loop()
 
     def run(
         self,
@@ -130,18 +162,17 @@ class RentFlow:
         sort_by: Optional[str] = None,
         skip_wizard: bool = False,
     ) -> Optional[Dict[str, Any]]:
-        self.gpu_model = gpu_model
-        self.min_count = min_count
-        self.max_price = max_price
-        self.verified_only = bool(verified_only)
-        if sort_by:
-            self.sort_by = sort_by
-
-        seeded = any([gpu_model, min_count, max_price, verified_only, sort_by])
-        if not seeded and not skip_wizard:
-            self._filter_wizard()
-
-        return self._browse_loop()
+        """Convenience: seed + run_next in one shot. Used by tests and ad-hoc callers."""
+        self.seed(
+            gpu_model=gpu_model,
+            min_count=min_count,
+            max_price=max_price,
+            verified_only=verified_only,
+            sort_by=sort_by,
+        )
+        if skip_wizard:
+            self._wizard_done = True
+        return self.run_next()
 
     # ── Filter wizard ───────────────────────────────────────────────────
 
@@ -276,70 +307,121 @@ class RentFlow:
         parts.append(f"sort: {self.sort_by}")
         return "  ·  ".join(parts)
 
-    # Column widths for everything except GPU model + LOCATION, which flex.
-    # Tuples are (key, header, width, align)  — align: '<' left, '>' right.
-    _FIXED_COLS: List[Tuple[str, str, int, str]] = [
-        ("idx",    "#",      4,  ">"),
-        # gpu flex
-        ("cnt",    "CNT",    4,  ">"),
-        ("vram",   "VRAM",   7,  ">"),
-        ("ram",    "RAM",    7,  ">"),
-        ("disk",   "DISK",   8,  ">"),
-        ("cpu",    "CPU",    4,  ">"),
-        ("net",    "NET ↓/↑",    16, ">"),
-        # location flex
-        ("relia",  "RELIA",  6,  ">"),
-        ("price",  "PRICE",  11, ">"),
-        ("verif",  "VER",    3,  "<"),
+    # Column catalog. Priority 0 = always shown; higher priorities get dropped
+    # first on narrow terminals. `width=None` means flex (share remaining space
+    # with other flex columns). `align`: '<' left, '>' right.
+    # The order here defines the left-to-right display order.
+    _COLS: List[Tuple[str, str, Optional[int], str, int]] = [
+        ("idx",      "#",        4,    ">", 0),
+        ("gpu",      "GPU",      None, "<", 0),   # flex
+        ("cnt",      "CNT",      4,    ">", 1),
+        ("vram",     "VRAM",     7,    ">", 1),
+        ("ram",      "RAM",      7,    ">", 3),
+        ("disk",     "DISK",     8,    ">", 4),
+        ("cpu",      "CPU",      4,    ">", 6),
+        ("cpu_model","CPU MODEL", 18,  "<", 8),
+        ("net",      "NET ↓/↑",  16,   ">", 5),
+        ("location", "LOCATION", None, "<", 2),   # flex
+        ("relia",    "RELIA",    6,    ">", 2),
+        ("avail",    "AVAIL",    6,    ">", 7),
+        ("hosting",  "HOSTING",  10,   "<", 9),
+        ("price",    "PRICE",    11,   ">", 0),
+        ("verif",    "VER",      3,    "<", 1),
     ]
 
-    def _build_table(self, agents: List[dict], width: int) -> str:
-        gap = 1
-        fixed_total = sum(c[2] for c in self._FIXED_COLS)
-        total_cols = len(self._FIXED_COLS) + 2  # +2 flex cols (gpu, location)
-        gaps_total = gap * (total_cols - 1)
-        remaining = max(30, width - fixed_total - gaps_total)
-        w_gpu = max(12, int(remaining * 0.58))
-        w_loc = max(8, remaining - w_gpu)
+    _MIN_FLEX = 10  # minimum per flex column
 
-        lines = [self._header_row(w_gpu, w_loc), rule("─", width)]
+    # ── Column selection (adaptive) ─────────────────────────────────────
+
+    def _choose_columns(self, width: int) -> List[Tuple[str, str, int, str]]:
+        """Pick the widest set of columns that fits. Returns columns in display
+        order, with flex widths resolved to concrete integers."""
+        priorities = sorted({c[4] for c in self._COLS})
+        chosen: List[Tuple[str, str, Optional[int], str, int]] = []
+
+        def cost(cols) -> int:
+            fixed = sum((w or 0) for _, _, w, _, _ in cols)
+            flex_n = sum(1 for _, _, w, _, _ in cols if w is None)
+            gaps = max(0, len(cols) - 1)
+            return fixed + flex_n * self._MIN_FLEX + gaps
+
+        for pri in priorities:
+            candidate = chosen + [c for c in self._COLS if c[4] == pri and c not in chosen]
+            if cost(candidate) <= width:
+                chosen = candidate
+            else:
+                break
+
+        # Keep display order
+        order = {c[0]: i for i, c in enumerate(self._COLS)}
+        chosen.sort(key=lambda c: order[c[0]])
+
+        # Resolve flex widths — split leftover evenly, then give GPU a bigger share.
+        fixed_total = sum((w or 0) for _, _, w, _, _ in chosen)
+        flex_cols = [c for c in chosen if c[2] is None]
+        gaps = max(0, len(chosen) - 1)
+        flex_budget = max(self._MIN_FLEX * len(flex_cols), width - fixed_total - gaps)
+
+        flex_widths: Dict[str, int] = {}
+        if len(flex_cols) == 1:
+            flex_widths[flex_cols[0][0]] = flex_budget
+        elif len(flex_cols) == 2:
+            # GPU gets 60%, LOCATION 40% — GPU labels are longer on average.
+            gpu_w = max(self._MIN_FLEX, int(flex_budget * 0.60))
+            loc_w = max(self._MIN_FLEX, flex_budget - gpu_w)
+            flex_widths["gpu"] = gpu_w
+            flex_widths["location"] = loc_w
+        else:
+            for c in flex_cols:
+                flex_widths[c[0]] = max(self._MIN_FLEX, flex_budget // max(1, len(flex_cols)))
+
+        return [
+            (key, header, flex_widths.get(key, w or 0), align)
+            for (key, header, w, align, _pri) in chosen
+        ]
+
+    # ── Rendering ───────────────────────────────────────────────────────
+
+    def _build_table(self, agents: List[dict], width: int) -> str:
+        cols = self._choose_columns(width)
+        lines = [self._render_row(cols, self._header_values(cols))]
+        lines.append(rule("─", width))
         for i, a in enumerate(agents, 1):
-            lines.append(self._data_row(i, a, w_gpu, w_loc))
+            lines.append(self._render_row(cols, self._data_values(i, a)))
         return "\n".join(lines)
 
-    def _header_row(self, w_gpu: int, w_loc: int) -> str:
-        fields = {key: (header, align) for key, header, _, align in self._FIXED_COLS}
-        return self._compose_row({
-            **{key: fields[key][0] for key in fields},
-            "gpu": "GPU",
-            "location": "LOCATION",
-        }, w_gpu, w_loc)
+    @staticmethod
+    def _header_values(cols: List[Tuple[str, str, int, str]]) -> Dict[str, str]:
+        return {key: header for key, header, _, _ in cols}
 
-    def _data_row(self, i: int, a: dict, w_gpu: int, w_loc: int) -> str:
-        return self._compose_row({
-            "idx":      str(i),
-            "gpu":      str(a.get("gpu_model") or "Unknown"),
-            "cnt":      str(a.get("gpu_count") or 1),
-            "vram":     self._gb(a.get("vram_gb")),
-            "ram":      self._gb(a.get("ram_gb")),
-            "disk":     self._gb(a.get("storage_gb")),
-            "cpu":      str(a.get("cpu_count") or "—"),
-            "net":      self._net(a.get("down_mbps"), a.get("up_mbps")),
-            "location": str(a.get("location") or "—"),
-            "relia":    self._pct(a.get("reliability")),
-            "price":    fmt_price(a.get("price_per_hour")),
-            "verif":    "✓" if a.get("verified") else "·",
-        }, w_gpu, w_loc)
+    def _data_values(self, i: int, a: dict) -> Dict[str, str]:
+        return {
+            "idx":       str(i),
+            "gpu":       str(a.get("gpu_model") or "Unknown"),
+            "cnt":       str(a.get("gpu_count") or 1),
+            "vram":      self._gb(a.get("vram_gb")),
+            "ram":       self._gb(a.get("ram_gb")),
+            "disk":      self._gb(a.get("storage_gb")),
+            "cpu":       str(a.get("cpu_count") or "—"),
+            "cpu_model": str(a.get("cpu_model") or "—"),
+            "net":       self._net(a.get("down_mbps"), a.get("up_mbps")),
+            "location":  str(a.get("location") or "—"),
+            "relia":     self._pct(a.get("reliability")),
+            "avail":     self._pct(a.get("availability")),
+            "hosting":   str(a.get("hosting_type") or "—"),
+            "price":     fmt_price(a.get("price_per_hour")),
+            "verif":     "✓" if a.get("verified") else "·",
+        }
 
-    def _compose_row(self, values: Dict[str, str], w_gpu: int, w_loc: int) -> str:
+    @staticmethod
+    def _render_row(
+        cols: List[Tuple[str, str, int, str]],
+        values: Dict[str, str],
+    ) -> str:
         parts: List[str] = []
-        for key, _header, width, align in self._FIXED_COLS:
+        for key, _header, w, align in cols:
             v = values.get(key, "")
-            parts.append(f"{truncate(v, width):{align}{width}}")
-            if key == "idx":
-                parts.append(f"{truncate(values.get('gpu', ''), w_gpu):<{w_gpu}}")
-            if key == "net":
-                parts.append(f"{truncate(values.get('location', ''), w_loc):<{w_loc}}")
+            parts.append(f"{truncate(v, w):{align}{w}}")
         return " ".join(parts)
 
     # ── Cell formatters ─────────────────────────────────────────────────

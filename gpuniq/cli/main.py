@@ -1016,6 +1016,53 @@ def _pick_pricing_type(default: str = "hour") -> str:
         return ans if ans in ("minute", "hour", "day", "week", "month") else default
 
 
+def _place_order_with_retry(api: ClientAPI, flow, *, pricing_type, volume_id, gpu_required):
+    """Ask for a GPU pick, confirm, and place the order.  On 410 (offer gone)
+    drop back into the picker so the user can choose a different one without
+    re-answering plan/volume questions.  Returns the order dict or None."""
+    from gpuniq.cli.client_api import OrderOfferGone
+
+    while True:
+        target = flow.run_next()
+        if not target:
+            return None
+
+        agent_id = target.get("id")
+        gpu_label = f"{target.get('gpu_model','?')} x{target.get('gpu_count',1)}"
+        price = _fmt_price_hr(target.get("price_per_hour"))
+
+        print()
+        print(f"  Selected: #{agent_id}  {gpu_label}  {price}  · {target.get('location','—')}")
+        print()
+        print("  Order summary")
+        print(f"    GPU:        {gpu_label}")
+        print(f"    Price:      {price} ({pricing_type})")
+        print(f"    Volume:     {'#' + str(volume_id) if volume_id else '— none —'}")
+
+        if not _confirm("Place order?", default=True):
+            if _confirm("Pick another GPU?", default=True):
+                continue
+            return None
+
+        print("[gg] Sending order…")
+        try:
+            result = api.create_order(
+                agent_id=agent_id,
+                pricing_type=pricing_type,
+                gpu_required=gpu_required,
+                volume_id=volume_id,
+            )
+        except OrderOfferGone as e:
+            print(f"[gg] Offer #{agent_id} is gone — {e.message}")
+            if _confirm("Pick another GPU with the same plan / volume?", default=True):
+                continue
+            return None
+
+        if result is None:
+            return None
+        return result
+
+
 def cmd_rent(args):
     """Interactive: browse marketplace and rent a GPU."""
     from gpuniq.cli.rent_ui import RentFlow, banner
@@ -1025,53 +1072,33 @@ def cmd_rent(args):
 
     print(banner("gg rent — GPU marketplace"))
 
-    target = RentFlow(api).run(
+    flow = RentFlow(api)
+    flow.seed(
         gpu_model=args.gpu,
         min_count=args.count,
         max_price=args.max_price,
         verified_only=bool(args.verified),
         sort_by=args.sort,
     )
-    if not target:
-        print("[gg] Cancelled.")
-        return
-
-    agent_id = target.get("id")
-    gpu_label = f"{target.get('gpu_model','?')} x{target.get('gpu_count',1)}"
-    price = _fmt_price_hr(target.get("price_per_hour"))
-
-    print()
-    print(f"  Selected: #{agent_id}  {gpu_label}  {price}  · {target.get('location','—')}")
 
     pricing_type = args.pricing or _pick_pricing_type()
 
-    volume_id = None
     if args.no_volume:
-        pass
+        volume_id = None
     elif args.volume_id:
         volume_id = int(args.volume_id)
     else:
         volume_id = _select_or_create_volume(api)
 
-    print()
-    print("  Order summary")
-    print(f"    GPU:        {gpu_label}")
-    print(f"    Price:      {price} ({pricing_type})")
-    print(f"    Volume:     {'#' + str(volume_id) if volume_id else '— none —'}")
-
-    if not _confirm("Place order?", default=True):
+    result = _place_order_with_retry(
+        api, flow,
+        pricing_type=pricing_type,
+        volume_id=volume_id,
+        gpu_required=args.count or 0,
+    )
+    if result is None:
         print("[gg] Cancelled.")
         return
-
-    print("[gg] Sending order…")
-    result = api.create_order(
-        agent_id=agent_id,
-        pricing_type=pricing_type,
-        gpu_required=args.count or 0,
-        volume_id=volume_id,
-    )
-    if not result:
-        sys.exit(1)
 
     order_id = result.get("order_id") or result.get("task_id")
     msg = result.get("message", "")
@@ -1126,6 +1153,7 @@ def _pick_running_instance(api: ClientAPI, preselected_id=None) -> Optional[dict
 
 def cmd_replace(args):
     """Stop a running instance and rent a new GPU, preserving volume + plan."""
+    from gpuniq.cli.client_api import OrderOfferGone
     from gpuniq.cli.rent_ui import RentFlow, banner
 
     cfg = _get_client_config()
@@ -1144,55 +1172,90 @@ def cmd_replace(args):
     print(f"  Current: {info['gpu_label']}  ({info['status']})  ·  plan: {old_pricing}")
     print(f"  Volume:  {'#' + str(old_volume_id) if old_volume_id else '— none —'}")
 
-    new_target = RentFlow(api).run(
+    flow = RentFlow(api)
+    flow.seed(
         gpu_model=args.gpu,
         min_count=args.count,
         max_price=args.max_price,
         verified_only=bool(args.verified),
         sort_by=args.sort,
     )
-    if not new_target:
-        print("[gg] Cancelled.")
+
+    # Find a new GPU that the user is ready to commit to (may retry on 410).
+    while True:
+        new_target = flow.run_next()
+        if not new_target:
+            print("[gg] Cancelled.")
+            return
+
+        new_gpu_label = f"{new_target.get('gpu_model','?')} x{new_target.get('gpu_count',1)}"
+        new_price = _fmt_price_hr(new_target.get("price_per_hour"))
+
+        print()
+        print("  Replacement summary")
+        print(f"    Old:    #{info['id']}  {info['gpu_label']}  ({_fmt_price_hr(info['price_per_hour'])})")
+        print(f"    New:    {new_gpu_label}  ({new_price})  · {new_target.get('location','—')}")
+        print(f"    Plan:   {old_pricing}")
+        print(f"    Volume: {'#' + str(old_volume_id) if old_volume_id else '— none — (data on the old instance will be lost)'}")
+        print()
+
+        if not _confirm(
+            f"Stop #{info['id']} and start the new GPU? This terminates the current machine.",
+            default=False,
+        ):
+            if _confirm("Pick a different replacement GPU?", default=True):
+                continue
+            print("[gg] Cancelled.")
+            return
+
+        print(f"[gg] Stopping #{info['id']}…")
+        if not api.stop_instance(info["id"]):
+            print("[gg] Could not stop old instance — aborting before placing new order.", file=sys.stderr)
+            sys.exit(1)
+
+        print("[gg] Provisioning replacement…")
+        try:
+            result = api.create_order(
+                agent_id=new_target.get("id"),
+                pricing_type=old_pricing,
+                gpu_required=args.count or 0,
+                volume_id=old_volume_id,
+            )
+        except OrderOfferGone as e:
+            print(f"[gg] Offer gone — {e.message}")
+            print("[gg] Old instance already stopped. Renting a different GPU…")
+            # Old instance is already stopped; we need to place SOMETHING or leave the user
+            # without a GPU. Let them pick another offer with the same plan + volume.
+            while True:
+                retry = flow.run_next()
+                if not retry:
+                    print("[gg] No replacement placed. Run: gg rent", file=sys.stderr)
+                    sys.exit(1)
+                try:
+                    result = api.create_order(
+                        agent_id=retry.get("id"),
+                        pricing_type=old_pricing,
+                        gpu_required=args.count or 0,
+                        volume_id=old_volume_id,
+                    )
+                    new_target = retry
+                    new_gpu_label = f"{retry.get('gpu_model','?')} x{retry.get('gpu_count',1)}"
+                    break
+                except OrderOfferGone as ee:
+                    print(f"[gg] #{retry.get('id')} also gone — {ee.message}. Picking again…")
+
+        if not result:
+            print(
+                "[gg] Replacement order failed. Old instance is already stopped — "
+                "rent manually with: gg rent",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        new_id = result.get("order_id") or result.get("task_id")
+        print(f"[gg] Replacement placed: #{new_id} ({new_gpu_label})")
+        print(f"[gg] Track it: gg orders   ·   SSH: gg open {new_id}")
         return
-
-    new_gpu_label = f"{new_target.get('gpu_model','?')} x{new_target.get('gpu_count',1)}"
-    new_price = _fmt_price_hr(new_target.get("price_per_hour"))
-
-    print()
-    print("  Replacement summary")
-    print(f"    Old:    #{info['id']}  {info['gpu_label']}  ({_fmt_price_hr(info['price_per_hour'])})")
-    print(f"    New:    {new_gpu_label}  ({new_price})  · {new_target.get('location','—')}")
-    print(f"    Plan:   {old_pricing}")
-    print(f"    Volume: {'#' + str(old_volume_id) if old_volume_id else '— none — (data on the old instance will be lost)'}")
-    print()
-
-    if not _confirm(
-        f"Stop #{info['id']} and start the new GPU? This terminates the current machine.",
-        default=False,
-    ):
-        print("[gg] Cancelled.")
-        return
-
-    print(f"[gg] Stopping #{info['id']}…")
-    if not api.stop_instance(info["id"]):
-        print("[gg] Could not stop old instance — aborting before placing new order.", file=sys.stderr)
-        sys.exit(1)
-
-    print("[gg] Provisioning replacement…")
-    result = api.create_order(
-        agent_id=new_target.get("id"),
-        pricing_type=old_pricing,
-        gpu_required=args.count or 0,
-        volume_id=old_volume_id,
-    )
-    if not result:
-        print("[gg] Replacement order failed. Old instance is still stopped — rent manually with: gg rent",
-              file=sys.stderr)
-        sys.exit(1)
-
-    new_id = result.get("order_id") or result.get("task_id")
-    print(f"[gg] Replacement placed: #{new_id} ({new_gpu_label})")
-    print(f"[gg] Track it: gg orders   ·   SSH: gg open {new_id}")
 
 
 def _cmd_volumes_delete(api: ClientAPI, args):
