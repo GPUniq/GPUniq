@@ -205,3 +205,97 @@ class ClientAPI:
         except Exception as e:
             print(f"[gg] Error: could not delete volume: {e}", file=sys.stderr)
             return False
+
+    # ─── Marketplace (browse + rent GPUs) ────────────────────────────────────
+
+    def list_marketplace(
+        self,
+        page: int = 1,
+        page_size: int = 10,
+        gpu_model: Optional[List[str]] = None,
+        min_gpu_count: Optional[int] = None,
+        max_price_per_hour: Optional[float] = None,
+        verified_only: Optional[bool] = None,
+        sort_by: str = "price-low",
+        search: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Browse available GPUs in the marketplace."""
+        params: dict = {"page": page, "page_size": page_size, "sort_by": sort_by}
+        if gpu_model:
+            params["gpu_model"] = gpu_model
+        if min_gpu_count is not None:
+            params["gpu_count"] = min_gpu_count
+        if max_price_per_hour is not None:
+            params["max_price_per_hour"] = max_price_per_hour
+        if verified_only:
+            params["verified"] = "true"
+        if search:
+            params["search"] = search
+
+        try:
+            resp = self.session.get(
+                f"{self.base_url}/marketplace/list",
+                params=params,
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            return resp.json().get("data", {})
+        except Exception as e:
+            print(f"[gg] Error: could not fetch marketplace: {e}", file=sys.stderr)
+            return None
+
+    def get_agent_details(self, agent_id) -> Optional[dict]:
+        """Get full details for a marketplace agent (offer)."""
+        try:
+            resp = self.session.get(
+                f"{self.base_url}/marketplace/agent/{agent_id}",
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            return resp.json().get("data", {})
+        except Exception as e:
+            print(f"[gg] Error: could not fetch agent details: {e}", file=sys.stderr)
+            return None
+
+    def create_order(
+        self,
+        agent_id,
+        pricing_type: str = "hour",
+        gpu_required: int = 0,
+        ssh_key_ids: Optional[List[int]] = None,
+        volume_id: Optional[int] = None,
+        docker_image: Optional[str] = None,
+        disk_gb: Optional[int] = None,
+    ) -> Optional[dict]:
+        """Create a GPU rental order (synchronous)."""
+        body: dict = {"agent_id": agent_id, "pricing_type": pricing_type}
+        if gpu_required:
+            body["gpu_required"] = gpu_required
+        if ssh_key_ids:
+            body["ssh_key_ids"] = ssh_key_ids
+        if volume_id:
+            body["volume_id"] = volume_id
+        if docker_image:
+            body["docker_image"] = docker_image
+        if disk_gb:
+            body["disk_gb"] = disk_gb
+
+        try:
+            resp = self.session.post(
+                f"{self.base_url}/marketplace/order",
+                json=body,
+                timeout=120,  # provisioning can take a while
+            )
+            resp.raise_for_status()
+            return resp.json().get("data", {})
+        except requests.exceptions.HTTPError as e:
+            detail = ""
+            try:
+                detail = e.response.json().get("detail", "")
+            except Exception:
+                pass
+            print(f"[gg] Error: order failed: {detail or e}", file=sys.stderr)
+            return None
+        except Exception as e:
+            print(f"[gg] Error: order failed: {e}", file=sys.stderr)
+            return None

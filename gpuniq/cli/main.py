@@ -5,6 +5,7 @@ import sys
 import time
 from datetime import datetime
 from getpass import getpass
+from typing import List, Optional
 
 from gpuniq.cli.api import CheckpointAPI
 from gpuniq.cli.client_api import ClientAPI
@@ -281,22 +282,61 @@ def cmd_replay(args):
 
 
 def cmd_status(args):
+    """Show CLI status: client login (gg login) and/or GPU-side init (gg init)."""
     gg_dir = args.gg_dir or DEFAULT_GG_DIR
-    cfg = _get_config(gg_dir)
-    store = _get_store(cfg)
-    data = cfg.load()
+    client_cfg = ClientConfig()
+    server_cfg = GGConfig(gg_dir)
 
-    checkpoints = store.get_checkpoints()
-    total_size = store.total_log_size()
+    if not client_cfg.exists() and not server_cfg.exists():
+        print("Not logged in. Run: gg login")
+        print("Or initialize on a GPU: gg init <token>")
+        sys.exit(1)
 
-    size_mb = total_size / (1024 * 1024)
+    if client_cfg.exists():
+        try:
+            data = client_cfg.load()
+        except Exception as e:
+            print(f"Error: could not read client config: {e}", file=sys.stderr)
+            sys.exit(1)
 
-    print(f"Task ID:      {data.get('task_id', '?')}")
-    print(f"Instance:     {data.get('instance_name', '-')}")
-    print(f"API URL:      {data.get('api_base_url', '?')}")
-    print(f"Initialized:  {data.get('initialized_at', '?')}")
-    print(f"Checkpoints:  {len(checkpoints)}")
-    print(f"Total logs:   {size_mb:.1f} MB")
+        api_url = data.get("api_base_url", "?")
+        api_key = data.get("api_key", "")
+        masked = (api_key[:6] + "…" + api_key[-4:]) if len(api_key) > 14 else "set"
+
+        # Probe the API to verify the key is still valid
+        api = ClientAPI(api_url, api_key)
+        verify = api.verify_key()
+        connected = verify is not None
+
+        print("CLI Login (gg login)")
+        print(f"  Status:     {'connected' if connected else 'unreachable / invalid key'}")
+        print(f"  API URL:    {api_url}")
+        print(f"  API key:    {masked}")
+        if connected:
+            payload = (verify or {}).get("data", {}) or {}
+            total = payload.get("total_count", len(payload.get("instances", []) or []))
+            running = sum(
+                1 for i in (payload.get("instances", []) or []) if i.get("status") == "running"
+            )
+            running_label = f" ({running} running on this page)" if running else ""
+            print(f"  Instances:  {total} total{running_label}")
+
+    if server_cfg.exists():
+        store = _get_store(server_cfg)
+        data = server_cfg.load()
+        checkpoints = store.get_checkpoints()
+        total_size = store.total_log_size()
+        size_mb = total_size / (1024 * 1024)
+
+        if client_cfg.exists():
+            print()
+        print("GPU-side init (gg init)")
+        print(f"  Task ID:      {data.get('task_id', '?')}")
+        print(f"  Instance:     {data.get('instance_name', '-')}")
+        print(f"  API URL:      {data.get('api_base_url', '?')}")
+        print(f"  Initialized:  {data.get('initialized_at', '?')}")
+        print(f"  Checkpoints:  {len(checkpoints)}")
+        print(f"  Total logs:   {size_mb:.1f} MB")
 
 
 def cmd_services(args):
@@ -881,6 +921,390 @@ def _cmd_volumes_create(api: ClientAPI, args):
         sys.exit(1)
 
 
+def _select_or_create_volume(api: ClientAPI) -> Optional[int]:
+    """Interactive volume selection: pick existing, create new, or skip.
+    Returns volume_id or None if user skips / cancels."""
+    try:
+        from InquirerPy import inquirer
+    except ImportError:
+        # Without InquirerPy we can't really do an interactive picker — skip volume.
+        return None
+
+    volumes = api.list_volumes() or []
+
+    choices = [{"name": "→ Skip (no volume)", "value": "__skip__"}]
+    for v in volumes:
+        size = v.get("size_limit_gb", 0)
+        used = v.get("used_size_gb", 0) or 0
+        name = v.get("name", "?")
+        choices.append({
+            "name": f"#{v.get('id')}  {name}  ({used:.1f}/{size:.0f} GB)",
+            "value": v.get("id"),
+        })
+    choices.append({"name": "+ Create new volume", "value": "__new__"})
+
+    pick = inquirer.select(
+        message="Attach a volume? (persistent storage, survives instance restart)",
+        choices=choices,
+        default="__skip__",
+    ).execute()
+
+    if pick == "__skip__":
+        return None
+
+    if pick == "__new__":
+        name = inquirer.text(message="Volume name:").execute()
+        if not name or not name.strip():
+            print("[gg] Cancelled — no name given.")
+            return None
+        size_str = inquirer.text(
+            message="Size limit (GB, 20–200):",
+            default="20",
+        ).execute()
+        try:
+            size = float(size_str)
+        except (ValueError, TypeError):
+            print("[gg] Invalid size; skipping volume.")
+            return None
+        result = api.create_volume(name.strip(), size)
+        if not result:
+            return None
+        new_id = result.get("id")
+        print(f"[gg] Volume #{new_id} '{name}' created ({size:.0f} GB)")
+        return new_id
+
+    return pick
+
+
+def _format_price(price) -> str:
+    if price is None:
+        return "-"
+    try:
+        return f"${float(price):.2f}/hr"
+    except (TypeError, ValueError):
+        return "-"
+
+
+def _print_marketplace_table(items: list, start_idx: int = 1):
+    """Pretty-print a single page of marketplace agents."""
+    header = f"{'#':<4} {'GPU':<26} {'CNT':<5} {'VRAM':<7} {'LOC':<14} {'PRICE/HR':<12} {'VERIFIED'}"
+    print(header)
+    print("-" * len(header))
+    for i, a in enumerate(items, start=start_idx):
+        gpu = a.get("gpu_model") or "Unknown"
+        if len(gpu) > 24:
+            gpu = gpu[:21] + "..."
+        cnt = a.get("gpu_count", 1) or 1
+        vram = a.get("vram_gb", 0)
+        vram_str = f"{vram} GB" if vram else "-"
+        loc = a.get("location", "-") or "-"
+        if len(loc) > 12:
+            loc = loc[:9] + "..."
+        price = _format_price(a.get("price_per_hour"))
+        verified = "✓" if a.get("verified") else " "
+        print(f"{i:<4} {gpu:<26} {cnt:<5} {vram_str:<7} {loc:<14} {price:<12} {verified}")
+
+
+def _interactive_pick_agent(
+    api: ClientAPI,
+    *,
+    gpu_model_filter: Optional[List[str]] = None,
+    min_gpu_count: Optional[int] = None,
+    max_price_per_hour: Optional[float] = None,
+    verified_only: bool = False,
+    sort_by: str = "price-low",
+    page_size: int = 10,
+) -> Optional[dict]:
+    """Browse marketplace with pagination & selection. Returns chosen agent dict or None."""
+    page = 1
+    while True:
+        data = api.list_marketplace(
+            page=page,
+            page_size=page_size,
+            gpu_model=gpu_model_filter,
+            min_gpu_count=min_gpu_count,
+            max_price_per_hour=max_price_per_hour,
+            verified_only=verified_only,
+            sort_by=sort_by,
+        )
+        if data is None:
+            return None
+        agents = data.get("agents", []) or []
+        total = data.get("total_count", len(agents))
+        total_pages = max(1, -(-total // page_size)) if total else 1
+
+        if not agents:
+            print("No GPUs match the current filters.")
+            return None
+
+        print()
+        print(f"Page {page}/{total_pages}  ·  sort: {sort_by}  ·  {total} total")
+        _print_marketplace_table(agents, start_idx=1)
+        print()
+
+        prompt_parts = ["[1-{}]=select".format(len(agents))]
+        if page < total_pages:
+            prompt_parts.append("n=next")
+        if page > 1:
+            prompt_parts.append("p=prev")
+        prompt_parts.append("s=sort")
+        prompt_parts.append("q=quit")
+        choice = input("  " + " | ".join(prompt_parts) + " > ").strip().lower()
+
+        if choice in ("q", "quit", "exit", ""):
+            return None
+        if choice == "n":
+            if page < total_pages:
+                page += 1
+            else:
+                print("[gg] Already at the last page.")
+            continue
+        if choice == "p":
+            if page > 1:
+                page -= 1
+            else:
+                print("[gg] Already at the first page.")
+            continue
+        if choice == "s":
+            try:
+                from InquirerPy import inquirer
+                sort_by = inquirer.select(
+                    message="Sort by:",
+                    choices=[
+                        {"name": "Cheapest first",       "value": "price-low"},
+                        {"name": "Most expensive first", "value": "price-high"},
+                        {"name": "Best reliability",     "value": "reliability"},
+                        {"name": "Most VRAM",            "value": "vram"},
+                        {"name": "Best performance",     "value": "performance"},
+                    ],
+                    default=sort_by,
+                ).execute()
+            except ImportError:
+                print("Install InquirerPy for interactive sort, or pass --sort", file=sys.stderr)
+            page = 1
+            continue
+
+        # Numeric pick
+        try:
+            idx = int(choice)
+        except ValueError:
+            print("[gg] Unrecognized input.")
+            continue
+        if not (1 <= idx <= len(agents)):
+            print(f"[gg] Pick a number between 1 and {len(agents)}.")
+            continue
+        return agents[idx - 1]
+
+
+def _confirm(prompt: str, default: bool = False) -> bool:
+    try:
+        from InquirerPy import inquirer
+        return inquirer.confirm(message=prompt, default=default).execute()
+    except ImportError:
+        suffix = " [Y/n] " if default else " [y/N] "
+        ans = input(prompt + suffix).strip().lower()
+        if not ans:
+            return default
+        return ans in ("y", "yes")
+
+
+def _pick_pricing_type(default: str = "hour") -> str:
+    try:
+        from InquirerPy import inquirer
+        return inquirer.select(
+            message="Billing plan:",
+            choices=[
+                {"name": "Per minute (most flexible)", "value": "minute"},
+                {"name": "Per hour",                   "value": "hour"},
+                {"name": "Per day",                    "value": "day"},
+                {"name": "Per week  (cheaper)",        "value": "week"},
+                {"name": "Per month (cheapest)",       "value": "month"},
+            ],
+            default=default,
+        ).execute()
+    except ImportError:
+        ans = input(f"Billing plan [minute/hour/day/week/month] (default {default}): ").strip().lower()
+        return ans if ans in ("minute", "hour", "day", "week", "month") else default
+
+
+def cmd_rent(args):
+    """Interactive: browse marketplace and rent a GPU."""
+    cfg = _get_client_config()
+    api = _get_client_api(cfg)
+
+    print("[gg] Browsing GPU marketplace…")
+
+    target = _interactive_pick_agent(
+        api,
+        gpu_model_filter=[args.gpu] if args.gpu else None,
+        min_gpu_count=args.count,
+        max_price_per_hour=args.max_price,
+        verified_only=bool(args.verified),
+        sort_by=args.sort or "price-low",
+    )
+    if not target:
+        print("[gg] Cancelled.")
+        return
+
+    agent_id = target.get("id")
+    gpu_label = f"{target.get('gpu_model','?')} x{target.get('gpu_count',1)}"
+    price = _format_price(target.get("price_per_hour"))
+
+    print()
+    print(f"  Selected: #{agent_id}  {gpu_label}  {price}  · {target.get('location','-')}")
+
+    pricing_type = args.pricing or _pick_pricing_type()
+
+    volume_id = None
+    if args.no_volume:
+        pass
+    elif args.volume_id:
+        volume_id = int(args.volume_id)
+    else:
+        volume_id = _select_or_create_volume(api)
+
+    print()
+    print("  Order summary:")
+    print(f"    GPU:        {gpu_label}")
+    print(f"    Price:      {price} ({pricing_type})")
+    print(f"    Volume:     {'#' + str(volume_id) if volume_id else '— none —'}")
+
+    if not _confirm("Place order?", default=True):
+        print("[gg] Cancelled.")
+        return
+
+    print("[gg] Sending order…")
+    result = api.create_order(
+        agent_id=agent_id,
+        pricing_type=pricing_type,
+        gpu_required=args.count or 0,
+        volume_id=volume_id,
+    )
+    if not result:
+        sys.exit(1)
+
+    order_id = result.get("order_id") or result.get("task_id")
+    msg = result.get("message", "")
+    final_cost = result.get("final_cost")
+    print(f"[gg] Order placed: #{order_id}")
+    if final_cost is not None:
+        print(f"[gg] Charged: ${float(final_cost):.4f}")
+    if msg:
+        print(f"[gg] {msg}")
+    print(f"[gg] Track it: gg orders   ·   SSH: gg open {order_id}")
+
+
+def cmd_replace(args):
+    """Stop a running instance and rent a new GPU, preserving volume + plan."""
+    cfg = _get_client_config()
+    api = _get_client_api(cfg)
+    data = api.get_instances()
+    if not data:
+        sys.exit(1)
+
+    instances = data.get("instances", [])
+    running = [i for i in instances if i.get("status") in ("running", "starting", "provisioning")]
+    if not running:
+        print("No running instances to replace. Rent one with: gg rent")
+        return
+
+    target_inst = None
+    if args.instance_id:
+        matched = [i for i in running if str(i.get("id")) == str(args.instance_id)]
+        if not matched:
+            print(f"Error: no running instance with ID {args.instance_id}", file=sys.stderr)
+            sys.exit(1)
+        target_inst = matched[0]
+    elif len(running) == 1:
+        target_inst = running[0]
+    else:
+        try:
+            from InquirerPy import inquirer
+        except ImportError:
+            print("Multiple running instances. Specify ID: gg replace <instance_id>")
+            for i in running:
+                info = _extract_instance_info(i)
+                print(f"  #{info['id']}  {info['gpu_label']}  ({info['status']})")
+            sys.exit(1)
+        choices = []
+        for i in running:
+            info = _extract_instance_info(i)
+            price_str = _format_price(info["price_per_hour"])
+            label = f"#{info['id']}  {info['gpu_label']}  ({info['status']})  {price_str}"
+            choices.append({"name": label, "value": i})
+        target_inst = inquirer.select(
+            message="Replace which instance?",
+            choices=choices,
+        ).execute()
+
+    if not target_inst:
+        sys.exit(1)
+
+    info = _extract_instance_info(target_inst)
+    billing = target_inst.get("billing") or {}
+    old_pricing = billing.get("pricing_type") or "hour"
+    old_volume_id = target_inst.get("volume_id")
+
+    print()
+    print(f"  Replacing #{info['id']}: {info['gpu_label']}  ({info['status']})")
+    print(f"  Current plan: {old_pricing}   ·   Volume: {'#' + str(old_volume_id) if old_volume_id else '— none —'}")
+    print()
+
+    print("[gg] Pick a replacement GPU…")
+    new_target = _interactive_pick_agent(
+        api,
+        gpu_model_filter=[args.gpu] if args.gpu else None,
+        min_gpu_count=args.count,
+        max_price_per_hour=args.max_price,
+        verified_only=bool(args.verified),
+        sort_by=args.sort or "price-low",
+    )
+    if not new_target:
+        print("[gg] Cancelled.")
+        return
+
+    new_gpu_label = f"{new_target.get('gpu_model','?')} x{new_target.get('gpu_count',1)}"
+    new_price = _format_price(new_target.get("price_per_hour"))
+
+    print()
+    print("  Replacement summary:")
+    print(f"    Old:    #{info['id']}  {info['gpu_label']}  ({_format_price(info['price_per_hour'])})")
+    print(f"    New:    {new_gpu_label}  ({new_price})  · {new_target.get('location','-')}")
+    print(f"    Plan:   {old_pricing}")
+    print(f"    Volume: {'#' + str(old_volume_id) if old_volume_id else '— none — (data on the old instance will be lost)'}")
+    print()
+
+    if not _confirm(
+        f"Stop #{info['id']} and start the new GPU? This terminates the current machine.",
+        default=False,
+    ):
+        print("[gg] Cancelled.")
+        return
+
+    # 1) Stop old
+    print(f"[gg] Stopping #{info['id']}…")
+    if not api.stop_instance(info["id"]):
+        print("[gg] Could not stop old instance — aborting before placing new order.", file=sys.stderr)
+        sys.exit(1)
+
+    # 2) Place new order with same plan/volume
+    print("[gg] Provisioning replacement…")
+    result = api.create_order(
+        agent_id=new_target.get("id"),
+        pricing_type=old_pricing,
+        gpu_required=args.count or 0,
+        volume_id=old_volume_id,
+    )
+    if not result:
+        print("[gg] Replacement order failed. Old instance is still stopped — rent manually with: gg rent",
+              file=sys.stderr)
+        sys.exit(1)
+
+    new_id = result.get("order_id") or result.get("task_id")
+    print(f"[gg] Replacement placed: #{new_id} ({new_gpu_label})")
+    print(f"[gg] Track it: gg orders   ·   SSH: gg open {new_id}")
+
+
 def _cmd_volumes_delete(api: ClientAPI, args):
     volume_id = args.volume_id
 
@@ -912,7 +1336,7 @@ def main():
     parser = argparse.ArgumentParser(
         prog="gg",
         description="GPUniq command checkpointing CLI",
-        usage="gg [-h] {init,list,logs,status,login,orders,open,stop,balance,ssh-keys,volumes} ... | gg <command>",
+        usage="gg [-h] {init,list,logs,status,login,orders,open,rent,replace,stop,balance,ssh-keys,volumes} ... | gg <command>",
     )
     parser.add_argument(
         "--gg-dir",
@@ -979,6 +1403,41 @@ def main():
     ssh_keys_sub.add_parser("list", help="List SSH keys in your account (default)")
     ssh_keys_sub.add_parser("add", help="Add a local SSH key to your account")
 
+    # gg rent — interactive GPU rental
+    rent_parser = subparsers.add_parser("rent", help="Interactively rent a GPU from the marketplace")
+    rent_parser.add_argument("--gpu", default=None, help="GPU model filter, e.g. 'RTX 4090'")
+    rent_parser.add_argument("--count", type=int, default=None, help="GPU count")
+    rent_parser.add_argument("--max-price", type=float, default=None, dest="max_price",
+                             help="Max price per hour (USD)")
+    rent_parser.add_argument("--sort", default=None,
+                             choices=["price-low", "price-high", "reliability", "vram", "performance"],
+                             help="Sort order (default price-low)")
+    rent_parser.add_argument("--pricing", default=None,
+                             choices=["minute", "hour", "day", "week", "month"],
+                             help="Billing plan (skip interactive prompt)")
+    rent_parser.add_argument("--volume-id", default=None, dest="volume_id",
+                             help="Attach this existing volume (skip prompt)")
+    rent_parser.add_argument("--no-volume", action="store_true", dest="no_volume",
+                             help="Skip the volume prompt entirely")
+    rent_parser.add_argument("--verified", action="store_true",
+                             help="Show only verified providers")
+
+    # gg replace — swap GPU on a running instance
+    replace_parser = subparsers.add_parser(
+        "replace", help="Replace a running instance with a different GPU"
+    )
+    replace_parser.add_argument("instance_id", nargs="?", default=None,
+                                help="Instance ID to replace (or pick interactively)")
+    replace_parser.add_argument("--gpu", default=None, help="GPU model filter, e.g. 'A100'")
+    replace_parser.add_argument("--count", type=int, default=None, help="GPU count")
+    replace_parser.add_argument("--max-price", type=float, default=None, dest="max_price",
+                                help="Max price per hour (USD)")
+    replace_parser.add_argument("--sort", default=None,
+                                choices=["price-low", "price-high", "reliability", "vram", "performance"],
+                                help="Sort order")
+    replace_parser.add_argument("--verified", action="store_true",
+                                help="Show only verified providers")
+
     # gg volumes [list|create|delete]
     vol_parser = subparsers.add_parser("volumes", help="Manage your storage volumes")
     vol_sub = vol_parser.add_subparsers(dest="volumes_action")
@@ -994,6 +1453,7 @@ def main():
     known_subcommands = {
         "init", "list", "logs", "status", "replay", "services", "restart",
         "login", "orders", "open", "balance", "stop", "ssh-keys", "volumes",
+        "rent", "replace",
         "-h", "--help", "--gg-dir",
     }
 
@@ -1052,6 +1512,10 @@ def main():
         if not args.volumes_action or args.volumes_action == "list":
             args.volumes_action = None
         cmd_volumes(args)
+    elif args.subcommand == "rent":
+        cmd_rent(args)
+    elif args.subcommand == "replace":
+        cmd_replace(args)
     else:
         parser.print_help()
 
