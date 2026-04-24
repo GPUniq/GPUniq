@@ -1145,6 +1145,167 @@ def cmd_rent(args):
     print(f"[gg] Track it: gg orders   ·   SSH: gg open {order_id}")
 
 
+def _sdk_client(cfg):
+    """Build a gpuniq.GPUniq client from the CLI's stored API key."""
+    from gpuniq import GPUniq
+
+    data = cfg.load()
+    return GPUniq(api_key=data["api_key"], base_url=data["api_base_url"])
+
+
+def cmd_llm(args):
+    """Chat with a text model. Without a prompt, opens an interactive REPL."""
+    cfg = _get_client_config()
+    client = _sdk_client(cfg)
+
+    if args.list_models:
+        models = client.llm.models()
+        default = client.llm.default_model()
+        print("Available models:")
+        for m in models:
+            mark = "  (default)" if m == default else ""
+            print(f"  {m}{mark}")
+        return
+
+    model = args.model
+    if args.prompt:
+        _llm_one_shot(client, args, model=model)
+        return
+    _llm_repl(client, args, model=model)
+
+
+def _llm_one_shot(client, args, *, model):
+    prompt = " ".join(args.prompt)
+    try:
+        data = client.llm.chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            model=model,
+            max_tokens=args.max_tokens,
+            temperature=args.temperature,
+        )
+    except Exception as e:
+        print(f"[gg] LLM request failed: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    content = (data or {}).get("content", "")
+    print(content)
+    if not args.quiet:
+        tokens = (data or {}).get("tokens_used")
+        cost = (data or {}).get("cost_usd")
+        bal = (data or {}).get("balance_usd")
+        parts = []
+        if tokens is not None:
+            parts.append(f"{tokens} tokens")
+        if cost is not None:
+            parts.append(f"${float(cost):.4f}")
+        if bal is not None:
+            parts.append(f"balance ${float(bal):.2f}")
+        if parts:
+            print(f"\n[gg] {'  ·  '.join(parts)}", file=sys.stderr)
+
+
+def _llm_repl(client, args, *, model):
+    from gpuniq.cli.rent_ui import banner
+
+    actual_model = model or client.llm.default_model() or "(default)"
+    print(banner(f"gg llm — interactive chat · model: {actual_model}"))
+    print("  Type your message and press Enter. /exit or Ctrl-D to quit, /clear to reset history.\n")
+
+    history: List[Dict[str, str]] = []
+    while True:
+        try:
+            line = input("you> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if not line:
+            continue
+        if line in ("/exit", "/quit"):
+            return
+        if line == "/clear":
+            history.clear()
+            print("[gg] history cleared.")
+            continue
+
+        history.append({"role": "user", "content": line})
+        try:
+            data = client.llm.chat_completion(
+                messages=history, model=model,
+                max_tokens=args.max_tokens, temperature=args.temperature,
+            )
+        except Exception as e:
+            print(f"[gg] LLM request failed: {e}", file=sys.stderr)
+            history.pop()
+            continue
+
+        reply = (data or {}).get("content", "")
+        print(f"\nllm> {reply}\n")
+        history.append({"role": "assistant", "content": reply})
+
+
+def cmd_image(args):
+    """Generate images from a prompt."""
+    cfg = _get_client_config()
+    client = _sdk_client(cfg)
+
+    prompt = " ".join(args.prompt).strip()
+    if not prompt:
+        print("Error: prompt is required. Example: gg image \"a red cat astronaut\"", file=sys.stderr)
+        sys.exit(2)
+
+    output = args.output or _default_image_filename(args.n)
+    input_paths = args.input or []
+
+    print(f"[gg] Generating {args.n} image(s) with {args.model}…")
+    try:
+        if args.async_job or args.model.startswith("nano-banana"):
+            # Prefer async-poll path for Nano Banana (long-running).
+            def _on_progress(status, _payload):
+                print(f"[gg] job status: {status}", file=sys.stderr)
+
+            result = client.llm.generate_image_async(
+                prompt,
+                model=args.model,
+                size=args.size,
+                quality=args.quality,
+                input_images=input_paths or None,
+                save_to=output,
+                on_progress=_on_progress,
+            )
+        else:
+            result = client.llm.generate_image(
+                prompt,
+                model=args.model,
+                n=args.n,
+                size=args.size,
+                quality=args.quality,
+                input_images=input_paths or None,
+                save_to=output,
+            )
+    except Exception as e:
+        print(f"[gg] Image generation failed: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    paths = result.get("saved_paths") or []
+    for p in paths:
+        print(f"[gg] Saved: {p}")
+
+    cost = result.get("cost_usd")
+    bal = result.get("balance_usd")
+    count = result.get("image_count", len(paths) or args.n)
+    line = f"[gg] {count} image(s)"
+    if cost is not None:
+        line += f"  ·  cost ${float(cost):.4f}"
+    if bal is not None:
+        line += f"  ·  balance ${float(bal):.2f}"
+    print(line)
+
+
+def _default_image_filename(n: int) -> str:
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return f"gpuniq-image-{ts}.png" if n == 1 else f"gpuniq-images-{ts}"
+
+
 def _pick_running_instance(api: ClientAPI, preselected_id=None) -> Optional[dict]:
     """Return a running instance dict, or None if cancelled / not found."""
     data = api.get_instances()
@@ -1337,7 +1498,7 @@ def main():
     parser = argparse.ArgumentParser(
         prog="gg",
         description="GPUniq command checkpointing CLI",
-        usage="gg [-h] {init,list,logs,status,login,orders,open,rent,replace,stop,balance,ssh-keys,volumes} ... | gg <command>",
+        usage="gg [-h] {init,list,logs,status,login,orders,open,rent,replace,llm,image,stop,balance,ssh-keys,volumes} ... | gg <command>",
     )
     parser.add_argument(
         "--gg-dir",
@@ -1449,6 +1610,45 @@ def main():
     replace_parser.add_argument("--disk", type=int, default=None,
                                 help="Disk size in GB (20-2048)")
 
+    # gg llm — chat with a text model (one-shot or REPL)
+    llm_parser = subparsers.add_parser(
+        "llm", help="Chat with an LLM (one-shot if prompt given, otherwise interactive REPL)"
+    )
+    llm_parser.add_argument("prompt", nargs="*",
+                            help="One-shot prompt. Omit for interactive chat mode.")
+    llm_parser.add_argument("-m", "--model", default=None,
+                            help="Model slug (default: platform default)")
+    llm_parser.add_argument("--max-tokens", type=int, default=None, dest="max_tokens",
+                            help="Cap response length")
+    llm_parser.add_argument("--temperature", type=float, default=None,
+                            help="Sampling temperature 0.0–1.0")
+    llm_parser.add_argument("--list-models", action="store_true", dest="list_models",
+                            help="List available text models and exit")
+    llm_parser.add_argument("-q", "--quiet", action="store_true",
+                            help="Suppress the tokens/cost/balance summary")
+
+    # gg image — generate images from a text prompt
+    img_parser = subparsers.add_parser(
+        "image", help="Generate image(s) from a prompt (Nano Banana, Nano Banana Pro, Grok 4 Image)"
+    )
+    img_parser.add_argument("prompt", nargs="+", help="Text prompt for the image")
+    img_parser.add_argument("-o", "--output", default=None,
+                            help="Output file (single) or directory (multi). "
+                                 "Default: auto-named PNG in cwd.")
+    img_parser.add_argument("-m", "--model", default="nano-banana",
+                            help="Image model slug (default: nano-banana)")
+    img_parser.add_argument("-n", "--n", type=int, default=1,
+                            help="Number of images (1-4, default 1)")
+    img_parser.add_argument("--size", default=None,
+                            help="Size hint, e.g. 1024x1024, 2048x2048, 4096x4096")
+    img_parser.add_argument("--quality", default=None,
+                            help="Quality hint, e.g. standard / hd")
+    img_parser.add_argument("--input", action="append", default=None,
+                            help="Reference image path (repeat for multiple) — "
+                                 "enables image-to-image / editing")
+    img_parser.add_argument("--async", action="store_true", dest="async_job",
+                            help="Force async job-based path (poll) instead of sync")
+
     # gg volumes [list|create|delete]
     vol_parser = subparsers.add_parser("volumes", help="Manage your storage volumes")
     vol_sub = vol_parser.add_subparsers(dest="volumes_action")
@@ -1464,7 +1664,7 @@ def main():
     known_subcommands = {
         "init", "list", "logs", "status", "replay", "services", "restart",
         "login", "orders", "open", "balance", "stop", "ssh-keys", "volumes",
-        "rent", "replace",
+        "rent", "replace", "llm", "image",
         "-h", "--help", "help", "--gg-dir",
     }
 
@@ -1547,6 +1747,10 @@ def main():
         cmd_rent(args)
     elif args.subcommand == "replace":
         cmd_replace(args)
+    elif args.subcommand == "llm":
+        cmd_llm(args)
+    elif args.subcommand == "image":
+        cmd_image(args)
     else:
         parser.print_help()
 
