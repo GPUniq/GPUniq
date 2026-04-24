@@ -921,6 +921,15 @@ def _cmd_volumes_create(api: ClientAPI, args):
         sys.exit(1)
 
 
+def _fmt_price_hr(value) -> str:
+    if value is None:
+        return "—"
+    try:
+        return f"${float(value):.2f}/hr"
+    except (TypeError, ValueError):
+        return "—"
+
+
 def _select_or_create_volume(api: ClientAPI) -> Optional[int]:
     """Interactive volume selection: pick existing, create new, or skip.
     Returns volume_id or None if user skips / cancels."""
@@ -976,126 +985,6 @@ def _select_or_create_volume(api: ClientAPI) -> Optional[int]:
     return pick
 
 
-def _format_price(price) -> str:
-    if price is None:
-        return "-"
-    try:
-        return f"${float(price):.2f}/hr"
-    except (TypeError, ValueError):
-        return "-"
-
-
-def _print_marketplace_table(items: list, start_idx: int = 1):
-    """Pretty-print a single page of marketplace agents."""
-    header = f"{'#':<4} {'GPU':<26} {'CNT':<5} {'VRAM':<7} {'LOC':<14} {'PRICE/HR':<12} {'VERIFIED'}"
-    print(header)
-    print("-" * len(header))
-    for i, a in enumerate(items, start=start_idx):
-        gpu = a.get("gpu_model") or "Unknown"
-        if len(gpu) > 24:
-            gpu = gpu[:21] + "..."
-        cnt = a.get("gpu_count", 1) or 1
-        vram = a.get("vram_gb", 0)
-        vram_str = f"{vram} GB" if vram else "-"
-        loc = a.get("location", "-") or "-"
-        if len(loc) > 12:
-            loc = loc[:9] + "..."
-        price = _format_price(a.get("price_per_hour"))
-        verified = "✓" if a.get("verified") else " "
-        print(f"{i:<4} {gpu:<26} {cnt:<5} {vram_str:<7} {loc:<14} {price:<12} {verified}")
-
-
-def _interactive_pick_agent(
-    api: ClientAPI,
-    *,
-    gpu_model_filter: Optional[List[str]] = None,
-    min_gpu_count: Optional[int] = None,
-    max_price_per_hour: Optional[float] = None,
-    verified_only: bool = False,
-    sort_by: str = "price-low",
-    page_size: int = 10,
-) -> Optional[dict]:
-    """Browse marketplace with pagination & selection. Returns chosen agent dict or None."""
-    page = 1
-    while True:
-        data = api.list_marketplace(
-            page=page,
-            page_size=page_size,
-            gpu_model=gpu_model_filter,
-            min_gpu_count=min_gpu_count,
-            max_price_per_hour=max_price_per_hour,
-            verified_only=verified_only,
-            sort_by=sort_by,
-        )
-        if data is None:
-            return None
-        agents = data.get("agents", []) or []
-        total = data.get("total_count", len(agents))
-        total_pages = max(1, -(-total // page_size)) if total else 1
-
-        if not agents:
-            print("No GPUs match the current filters.")
-            return None
-
-        print()
-        print(f"Page {page}/{total_pages}  ·  sort: {sort_by}  ·  {total} total")
-        _print_marketplace_table(agents, start_idx=1)
-        print()
-
-        prompt_parts = ["[1-{}]=select".format(len(agents))]
-        if page < total_pages:
-            prompt_parts.append("n=next")
-        if page > 1:
-            prompt_parts.append("p=prev")
-        prompt_parts.append("s=sort")
-        prompt_parts.append("q=quit")
-        choice = input("  " + " | ".join(prompt_parts) + " > ").strip().lower()
-
-        if choice in ("q", "quit", "exit", ""):
-            return None
-        if choice == "n":
-            if page < total_pages:
-                page += 1
-            else:
-                print("[gg] Already at the last page.")
-            continue
-        if choice == "p":
-            if page > 1:
-                page -= 1
-            else:
-                print("[gg] Already at the first page.")
-            continue
-        if choice == "s":
-            try:
-                from InquirerPy import inquirer
-                sort_by = inquirer.select(
-                    message="Sort by:",
-                    choices=[
-                        {"name": "Cheapest first",       "value": "price-low"},
-                        {"name": "Most expensive first", "value": "price-high"},
-                        {"name": "Best reliability",     "value": "reliability"},
-                        {"name": "Most VRAM",            "value": "vram"},
-                        {"name": "Best performance",     "value": "performance"},
-                    ],
-                    default=sort_by,
-                ).execute()
-            except ImportError:
-                print("Install InquirerPy for interactive sort, or pass --sort", file=sys.stderr)
-            page = 1
-            continue
-
-        # Numeric pick
-        try:
-            idx = int(choice)
-        except ValueError:
-            print("[gg] Unrecognized input.")
-            continue
-        if not (1 <= idx <= len(agents)):
-            print(f"[gg] Pick a number between 1 and {len(agents)}.")
-            continue
-        return agents[idx - 1]
-
-
 def _confirm(prompt: str, default: bool = False) -> bool:
     try:
         from InquirerPy import inquirer
@@ -1129,18 +1018,19 @@ def _pick_pricing_type(default: str = "hour") -> str:
 
 def cmd_rent(args):
     """Interactive: browse marketplace and rent a GPU."""
+    from gpuniq.cli.rent_ui import RentFlow, banner
+
     cfg = _get_client_config()
     api = _get_client_api(cfg)
 
-    print("[gg] Browsing GPU marketplace…")
+    print(banner("gg rent — GPU marketplace"))
 
-    target = _interactive_pick_agent(
-        api,
-        gpu_model_filter=[args.gpu] if args.gpu else None,
-        min_gpu_count=args.count,
-        max_price_per_hour=args.max_price,
+    target = RentFlow(api).run(
+        gpu_model=args.gpu,
+        min_count=args.count,
+        max_price=args.max_price,
         verified_only=bool(args.verified),
-        sort_by=args.sort or "price-low",
+        sort_by=args.sort,
     )
     if not target:
         print("[gg] Cancelled.")
@@ -1148,10 +1038,10 @@ def cmd_rent(args):
 
     agent_id = target.get("id")
     gpu_label = f"{target.get('gpu_model','?')} x{target.get('gpu_count',1)}"
-    price = _format_price(target.get("price_per_hour"))
+    price = _fmt_price_hr(target.get("price_per_hour"))
 
     print()
-    print(f"  Selected: #{agent_id}  {gpu_label}  {price}  · {target.get('location','-')}")
+    print(f"  Selected: #{agent_id}  {gpu_label}  {price}  · {target.get('location','—')}")
 
     pricing_type = args.pricing or _pick_pricing_type()
 
@@ -1164,7 +1054,7 @@ def cmd_rent(args):
         volume_id = _select_or_create_volume(api)
 
     print()
-    print("  Order summary:")
+    print("  Order summary")
     print(f"    GPU:        {gpu_label}")
     print(f"    Price:      {price} ({pricing_type})")
     print(f"    Volume:     {'#' + str(volume_id) if volume_id else '— none —'}")
@@ -1194,49 +1084,54 @@ def cmd_rent(args):
     print(f"[gg] Track it: gg orders   ·   SSH: gg open {order_id}")
 
 
-def cmd_replace(args):
-    """Stop a running instance and rent a new GPU, preserving volume + plan."""
-    cfg = _get_client_config()
-    api = _get_client_api(cfg)
+def _pick_running_instance(api: ClientAPI, preselected_id=None) -> Optional[dict]:
+    """Return a running instance dict, or None if cancelled / not found."""
     data = api.get_instances()
     if not data:
-        sys.exit(1)
-
-    instances = data.get("instances", [])
+        return None
+    instances = data.get("instances", []) or []
     running = [i for i in instances if i.get("status") in ("running", "starting", "provisioning")]
     if not running:
-        print("No running instances to replace. Rent one with: gg rent")
-        return
+        print("No running instances. Rent one with: gg rent")
+        return None
 
-    target_inst = None
-    if args.instance_id:
-        matched = [i for i in running if str(i.get("id")) == str(args.instance_id)]
+    if preselected_id:
+        matched = [i for i in running if str(i.get("id")) == str(preselected_id)]
         if not matched:
-            print(f"Error: no running instance with ID {args.instance_id}", file=sys.stderr)
-            sys.exit(1)
-        target_inst = matched[0]
-    elif len(running) == 1:
-        target_inst = running[0]
-    else:
-        try:
-            from InquirerPy import inquirer
-        except ImportError:
-            print("Multiple running instances. Specify ID: gg replace <instance_id>")
-            for i in running:
-                info = _extract_instance_info(i)
-                print(f"  #{info['id']}  {info['gpu_label']}  ({info['status']})")
-            sys.exit(1)
-        choices = []
+            print(f"Error: no running instance with ID {preselected_id}", file=sys.stderr)
+            return None
+        return matched[0]
+
+    if len(running) == 1:
+        return running[0]
+
+    try:
+        from InquirerPy import inquirer
+    except ImportError:
+        print("Multiple running instances. Specify ID: gg replace <instance_id>")
         for i in running:
             info = _extract_instance_info(i)
-            price_str = _format_price(info["price_per_hour"])
-            label = f"#{info['id']}  {info['gpu_label']}  ({info['status']})  {price_str}"
-            choices.append({"name": label, "value": i})
-        target_inst = inquirer.select(
-            message="Replace which instance?",
-            choices=choices,
-        ).execute()
+            print(f"  #{info['id']}  {info['gpu_label']}  ({info['status']})")
+        return None
 
+    choices = []
+    for i in running:
+        info = _extract_instance_info(i)
+        price_str = _fmt_price_hr(info["price_per_hour"])
+        label = f"#{info['id']}  {info['gpu_label']}  ({info['status']})  {price_str}"
+        choices.append({"name": label, "value": i})
+
+    return inquirer.select(message="Replace which instance?", choices=choices).execute()
+
+
+def cmd_replace(args):
+    """Stop a running instance and rent a new GPU, preserving volume + plan."""
+    from gpuniq.cli.rent_ui import RentFlow, banner
+
+    cfg = _get_client_config()
+    api = _get_client_api(cfg)
+
+    target_inst = _pick_running_instance(api, args.instance_id)
     if not target_inst:
         sys.exit(1)
 
@@ -1245,31 +1140,28 @@ def cmd_replace(args):
     old_pricing = billing.get("pricing_type") or "hour"
     old_volume_id = target_inst.get("volume_id")
 
-    print()
-    print(f"  Replacing #{info['id']}: {info['gpu_label']}  ({info['status']})")
-    print(f"  Current plan: {old_pricing}   ·   Volume: {'#' + str(old_volume_id) if old_volume_id else '— none —'}")
-    print()
+    print(banner(f"gg replace — swap GPU on #{info['id']}"))
+    print(f"  Current: {info['gpu_label']}  ({info['status']})  ·  plan: {old_pricing}")
+    print(f"  Volume:  {'#' + str(old_volume_id) if old_volume_id else '— none —'}")
 
-    print("[gg] Pick a replacement GPU…")
-    new_target = _interactive_pick_agent(
-        api,
-        gpu_model_filter=[args.gpu] if args.gpu else None,
-        min_gpu_count=args.count,
-        max_price_per_hour=args.max_price,
+    new_target = RentFlow(api).run(
+        gpu_model=args.gpu,
+        min_count=args.count,
+        max_price=args.max_price,
         verified_only=bool(args.verified),
-        sort_by=args.sort or "price-low",
+        sort_by=args.sort,
     )
     if not new_target:
         print("[gg] Cancelled.")
         return
 
     new_gpu_label = f"{new_target.get('gpu_model','?')} x{new_target.get('gpu_count',1)}"
-    new_price = _format_price(new_target.get("price_per_hour"))
+    new_price = _fmt_price_hr(new_target.get("price_per_hour"))
 
     print()
-    print("  Replacement summary:")
-    print(f"    Old:    #{info['id']}  {info['gpu_label']}  ({_format_price(info['price_per_hour'])})")
-    print(f"    New:    {new_gpu_label}  ({new_price})  · {new_target.get('location','-')}")
+    print("  Replacement summary")
+    print(f"    Old:    #{info['id']}  {info['gpu_label']}  ({_fmt_price_hr(info['price_per_hour'])})")
+    print(f"    New:    {new_gpu_label}  ({new_price})  · {new_target.get('location','—')}")
     print(f"    Plan:   {old_pricing}")
     print(f"    Volume: {'#' + str(old_volume_id) if old_volume_id else '— none — (data on the old instance will be lost)'}")
     print()
@@ -1281,13 +1173,11 @@ def cmd_replace(args):
         print("[gg] Cancelled.")
         return
 
-    # 1) Stop old
     print(f"[gg] Stopping #{info['id']}…")
     if not api.stop_instance(info["id"]):
         print("[gg] Could not stop old instance — aborting before placing new order.", file=sys.stderr)
         sys.exit(1)
 
-    # 2) Place new order with same plan/volume
     print("[gg] Provisioning replacement…")
     result = api.create_order(
         agent_id=new_target.get("id"),
