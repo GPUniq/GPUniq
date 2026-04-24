@@ -4,6 +4,48 @@ from typing import List, Optional
 import requests
 
 
+def _extract_error_detail(response) -> str:
+    """Best-effort pull of a human-readable error message from a requests.Response.
+
+    Handles three FastAPI shapes: {detail: str}, {detail: {message|message_ru|detail}},
+    {detail: [{msg}...]} (validation errors), and falls back to the raw text body."""
+    if response is None:
+        return ""
+    body = None
+    try:
+        body = response.json()
+    except Exception:
+        text = (response.text or "").strip()
+        return text[:500]
+
+    if isinstance(body, dict):
+        detail = body.get("detail", body)
+    else:
+        detail = body
+
+    if isinstance(detail, str):
+        return detail
+    if isinstance(detail, dict):
+        return (
+            detail.get("message")
+            or detail.get("message_ru")
+            or detail.get("detail")
+            or str(detail)
+        )
+    if isinstance(detail, list) and detail:
+        # Pydantic validation: each entry usually has {loc, msg, type}
+        parts = []
+        for item in detail:
+            if isinstance(item, dict):
+                loc = ".".join(str(x) for x in item.get("loc", []) if x != "body")
+                msg = item.get("msg") or ""
+                parts.append(f"{loc}: {msg}" if loc else msg)
+            else:
+                parts.append(str(item))
+        return "; ".join(p for p in parts if p)
+    return str(detail)
+
+
 class OrderOfferGone(Exception):
     """Raised when POST /marketplace/order returns 410 — offer is no longer available
     (another user rented it, or the provider removed it). Callers typically handle this
@@ -301,27 +343,17 @@ class ClientAPI:
             return resp.json().get("data", {})
         except requests.exceptions.HTTPError as e:
             status = e.response.status_code if e.response is not None else None
-            detail = ""
-            try:
-                detail = e.response.json().get("detail", "")
-            except Exception:
-                pass
+            detail = _extract_error_detail(e.response)
 
             # 410 Gone — the specific offer was snapped up or removed between
             # listing and ordering. Let the caller offer an "try another" retry.
             if status == 410:
-                message = detail
-                if isinstance(detail, dict):
-                    message = detail.get("message") or detail.get("message_ru") or ""
                 raise OrderOfferGone(
-                    message or "This GPU offer is no longer available.",
+                    detail or "This GPU offer is no longer available.",
                     agent_id,
                 ) from e
 
-            # Other error — print and return None as before.
-            if isinstance(detail, dict):
-                detail = detail.get("message") or detail.get("detail") or str(detail)
-            print(f"[gg] Error: order failed: {detail or e}", file=sys.stderr)
+            print(f"[gg] Error: order failed ({status}): {detail or e}", file=sys.stderr)
             return None
         except Exception as e:
             print(f"[gg] Error: order failed: {e}", file=sys.stderr)

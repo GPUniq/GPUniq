@@ -1016,10 +1016,14 @@ def _pick_pricing_type(default: str = "hour") -> str:
         return ans if ans in ("minute", "hour", "day", "week", "month") else default
 
 
-def _place_order_with_retry(api: ClientAPI, flow, *, pricing_type, volume_id, gpu_required):
+def _place_order_with_retry(
+    api: ClientAPI, flow, *,
+    pricing_type, volume_id, gpu_required,
+    docker_image, disk_gb,
+):
     """Ask for a GPU pick, confirm, and place the order.  On 410 (offer gone)
     drop back into the picker so the user can choose a different one without
-    re-answering plan/volume questions.  Returns the order dict or None."""
+    re-answering plan/volume/image questions.  Returns the order dict or None."""
     from gpuniq.cli.client_api import OrderOfferGone
 
     while True:
@@ -1036,8 +1040,11 @@ def _place_order_with_retry(api: ClientAPI, flow, *, pricing_type, volume_id, gp
         print()
         print("  Order summary")
         print(f"    GPU:        {gpu_label}")
+        print(f"    Image:      {docker_image}")
         print(f"    Price:      {price} ({pricing_type})")
         print(f"    Volume:     {'#' + str(volume_id) if volume_id else '— none —'}")
+        if disk_gb:
+            print(f"    Disk:       {disk_gb} GB")
 
         if not _confirm("Place order?", default=True):
             if _confirm("Pick another GPU?", default=True):
@@ -1051,6 +1058,8 @@ def _place_order_with_retry(api: ClientAPI, flow, *, pricing_type, volume_id, gp
                 pricing_type=pricing_type,
                 gpu_required=gpu_required,
                 volume_id=volume_id,
+                docker_image=docker_image,
+                disk_gb=disk_gb,
             )
         except OrderOfferGone as e:
             print(f"[gg] Offer #{agent_id} is gone — {e.message}")
@@ -1065,7 +1074,7 @@ def _place_order_with_retry(api: ClientAPI, flow, *, pricing_type, volume_id, gp
 
 def cmd_rent(args):
     """Interactive: browse marketplace and rent a GPU."""
-    from gpuniq.cli.rent_ui import RentFlow, banner
+    from gpuniq.cli.rent_ui import RentFlow, banner, pick_docker_image, DEFAULT_IMAGE
 
     cfg = _get_client_config()
     api = _get_client_api(cfg)
@@ -1083,6 +1092,13 @@ def cmd_rent(args):
 
     pricing_type = args.pricing or _pick_pricing_type()
 
+    if args.image:
+        docker_image, disk_gb = args.image, None
+    else:
+        docker_image, disk_gb = pick_docker_image()
+    if args.disk:
+        disk_gb = args.disk
+
     if args.no_volume:
         volume_id = None
     elif args.volume_id:
@@ -1095,6 +1111,8 @@ def cmd_rent(args):
         pricing_type=pricing_type,
         volume_id=volume_id,
         gpu_required=args.count or 0,
+        docker_image=docker_image or DEFAULT_IMAGE,
+        disk_gb=disk_gb,
     )
     if result is None:
         print("[gg] Cancelled.")
@@ -1154,7 +1172,7 @@ def _pick_running_instance(api: ClientAPI, preselected_id=None) -> Optional[dict
 def cmd_replace(args):
     """Stop a running instance and rent a new GPU, preserving volume + plan."""
     from gpuniq.cli.client_api import OrderOfferGone
-    from gpuniq.cli.rent_ui import RentFlow, banner
+    from gpuniq.cli.rent_ui import RentFlow, banner, pick_docker_image, DEFAULT_IMAGE
 
     cfg = _get_client_config()
     api = _get_client_api(cfg)
@@ -1167,10 +1185,18 @@ def cmd_replace(args):
     billing = target_inst.get("billing") or {}
     old_pricing = billing.get("pricing_type") or "hour"
     old_volume_id = target_inst.get("volume_id")
+    old_container = target_inst.get("container") or {}
+    old_image = old_container.get("docker_image") or DEFAULT_IMAGE
 
     print(banner(f"gg replace — swap GPU on #{info['id']}"))
     print(f"  Current: {info['gpu_label']}  ({info['status']})  ·  plan: {old_pricing}")
+    print(f"  Image:   {old_image}")
     print(f"  Volume:  {'#' + str(old_volume_id) if old_volume_id else '— none —'}")
+
+    if args.image:
+        new_image, new_disk = args.image, None
+    else:
+        new_image, new_disk = pick_docker_image(default_image=old_image)
 
     flow = RentFlow(api)
     flow.seed(
@@ -1195,6 +1221,7 @@ def cmd_replace(args):
         print("  Replacement summary")
         print(f"    Old:    #{info['id']}  {info['gpu_label']}  ({_fmt_price_hr(info['price_per_hour'])})")
         print(f"    New:    {new_gpu_label}  ({new_price})  · {new_target.get('location','—')}")
+        print(f"    Image:  {new_image}")
         print(f"    Plan:   {old_pricing}")
         print(f"    Volume: {'#' + str(old_volume_id) if old_volume_id else '— none — (data on the old instance will be lost)'}")
         print()
@@ -1220,6 +1247,8 @@ def cmd_replace(args):
                 pricing_type=old_pricing,
                 gpu_required=args.count or 0,
                 volume_id=old_volume_id,
+                docker_image=new_image,
+                disk_gb=new_disk,
             )
         except OrderOfferGone as e:
             print(f"[gg] Offer gone — {e.message}")
@@ -1237,6 +1266,8 @@ def cmd_replace(args):
                         pricing_type=old_pricing,
                         gpu_required=args.count or 0,
                         volume_id=old_volume_id,
+                        docker_image=new_image,
+                        disk_gb=new_disk,
                     )
                     new_target = retry
                     new_gpu_label = f"{retry.get('gpu_model','?')} x{retry.get('gpu_count',1)}"
@@ -1374,6 +1405,11 @@ def main():
                              help="Skip the volume prompt entirely")
     rent_parser.add_argument("--verified", action="store_true",
                              help="Show only verified providers")
+    rent_parser.add_argument("--image", default=None,
+                             help="Docker image to launch (skips preset prompt). "
+                                  "e.g. vastai/pytorch:cuda-12.9.1-auto")
+    rent_parser.add_argument("--disk", type=int, default=None,
+                             help="Disk size in GB (20-2048)")
 
     # gg replace — swap GPU on a running instance
     replace_parser = subparsers.add_parser(
@@ -1390,6 +1426,11 @@ def main():
                                 help="Sort order")
     replace_parser.add_argument("--verified", action="store_true",
                                 help="Show only verified providers")
+    replace_parser.add_argument("--image", default=None,
+                                help="Docker image for the replacement "
+                                     "(default: keep the old instance's image)")
+    replace_parser.add_argument("--disk", type=int, default=None,
+                                help="Disk size in GB (20-2048)")
 
     # gg volumes [list|create|delete]
     vol_parser = subparsers.add_parser("volumes", help="Manage your storage volumes")

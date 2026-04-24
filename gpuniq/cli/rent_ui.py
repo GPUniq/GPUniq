@@ -61,6 +61,66 @@ PRICE_PRESETS: List[Tuple[Optional[float], str]] = [
 PAGE_SIZE = 15
 MIN_WIDTH = 100
 
+# Mirror of frontend/src/lib/image-presets.ts — keep in sync.
+IMAGE_PRESETS: List[Tuple[str, str, str, Optional[int]]] = [
+    # (id, display name, docker image, suggested disk GB)
+    ("pytorch", "PyTorch  (default)",        "vastai/pytorch:cuda-12.9.1-auto",                    None),
+    ("comfy",   "ComfyUI",                   "vastai/comfy:v0.18.2-cuda-12.9-py312",               20),
+    ("vllm",    "vLLM",                      "vastai/vllm:v0.19.0-cuda-12.9",                      32),
+    ("ubuntu",  "Ubuntu VM  (KVM)",          "docker.io/vastai/kvm:ubuntu_desktop_22.04-2025-11-21", 130),
+]
+DEFAULT_IMAGE = IMAGE_PRESETS[0][2]
+
+
+def pick_docker_image(default_image: Optional[str] = None) -> Tuple[str, Optional[int]]:
+    """Prompt the user for a Docker image preset (or custom). Returns
+    (docker_image, suggested_disk_gb). Falls back to PyTorch if InquirerPy
+    isn't available."""
+    try:
+        from InquirerPy import inquirer
+    except ImportError:
+        return default_image or DEFAULT_IMAGE, None
+
+    default_id = "pytorch"
+    if default_image:
+        for pid, _label, img, _disk in IMAGE_PRESETS:
+            if img == default_image:
+                default_id = pid
+                break
+
+    choices = [
+        {"name": f"{label}  —  {img}", "value": pid}
+        for pid, label, img, _disk in IMAGE_PRESETS
+    ]
+    choices.append({"name": "Custom image…  (type your own)", "value": "__custom__"})
+    if default_image and default_image not in {img for _, _, img, _ in IMAGE_PRESETS}:
+        # Allow re-using the previous instance's image verbatim (for replace flow).
+        choices.insert(0, {
+            "name": f"Use current:  {default_image}",
+            "value": "__current__",
+        })
+        default_id = "__current__"
+
+    picked = inquirer.select(
+        message="Docker image:",
+        choices=choices,
+        default=default_id,
+    ).execute()
+
+    if picked == "__custom__":
+        text = inquirer.text(
+            message="Docker image (e.g. 'vastai/pytorch:cuda-12.9.1-auto'):",
+            default=default_image or DEFAULT_IMAGE,
+        ).execute()
+        return (text or DEFAULT_IMAGE).strip(), None
+    if picked == "__current__":
+        return default_image or DEFAULT_IMAGE, None
+
+    for pid, _label, img, disk in IMAGE_PRESETS:
+        if pid == picked:
+            return img, disk
+    return DEFAULT_IMAGE, None
+
 
 # ─── Small helpers ───────────────────────────────────────────────────────────
 
