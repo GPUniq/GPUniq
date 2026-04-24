@@ -1465,12 +1465,32 @@ def main():
         "init", "list", "logs", "status", "replay", "services", "restart",
         "login", "orders", "open", "balance", "stop", "ssh-keys", "volumes",
         "rent", "replace",
-        "-h", "--help", "--gg-dir",
+        "-h", "--help", "help", "--gg-dir",
     }
 
+    # "gg help" → same as "gg --help"
+    if len(sys.argv) > 1 and sys.argv[1] == "help":
+        parser.print_help()
+        return
+
+    # `gg <word>` where <word> isn't a known subcommand is ambiguous:
+    #   • On a GPU where `gg init` was run, it means "run this shell command
+    #     under checkpointing" — the original GG_TOKEN workflow.
+    #   • On a client machine (only `gg login` done), it almost certainly
+    #     means a typo or a feature that doesn't exist — and the existing
+    #     fallback used to respond with the confusing
+    #     "Error: gg not initialized. Run: gg init <token>".
+    # Disambiguate by checking whether the .gg init config actually exists.
     if len(sys.argv) > 1 and sys.argv[1] not in known_subcommands:
-        # Build a namespace manually for the run command
-        # Find and extract --gg-dir if present
+        server_cfg = GGConfig(DEFAULT_GG_DIR)
+        if not server_cfg.exists():
+            # Client machine — treat as typo / unknown command.
+            print(f"Error: unknown command '{sys.argv[1]}'.", file=sys.stderr)
+            print(file=sys.stderr)
+            parser.print_help(sys.stderr)
+            sys.exit(2)
+
+        # GPU-side: run as shell command under checkpointing.
         argv = sys.argv[1:]
         gg_dir = None
         filtered = []
