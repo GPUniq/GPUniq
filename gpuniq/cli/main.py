@@ -617,16 +617,32 @@ def cmd_open(args):
     # Check for local SSH keys and offer to attach
     _maybe_attach_ssh_key(api, target)
 
-    # Connect via SSH
-    ssh_user = target["ssh_username"]
-    ssh_host = target["ssh_host"]
-    ssh_port = str(target["ssh_port"])
+    # Prefer ssh.gpuniq.com proxy over the direct provider IP. For instances
+    # whose proxy allocation failed at order time, ask the backend to allocate
+    # one now; fall back to the stored host on error.
+    proxy = _ensure_proxy_host(api, target)
+    ssh_user = proxy.get("ssh_username") or target["ssh_username"]
+    ssh_host = proxy.get("ssh_host") or target["ssh_host"]
+    ssh_port = str(proxy.get("ssh_port") or target["ssh_port"])
 
     ssh_args = ["ssh", f"{ssh_user}@{ssh_host}", "-p", ssh_port]
     print(f"[gg] {' '.join(ssh_args)}\n")
 
     # Replace current process with SSH
     os.execvp("ssh", ssh_args)
+
+
+def _ensure_proxy_host(api: ClientAPI, target: dict) -> dict:
+    """If the instance's ssh_host looks like a direct IP, ask the backend to
+    allocate an ssh.gpuniq.com proxy port for it. Returns a dict with ssh_host /
+    ssh_port / ssh_username (possibly empty — caller falls back to direct)."""
+    host = (target.get("ssh_host") or "").strip()
+    if host.endswith("gpuniq.com"):
+        return {}
+    result = api.ensure_ssh_proxy(target["id"])
+    if result:
+        return result
+    return {}
 
 
 def _maybe_attach_ssh_key(api: ClientAPI, target: dict):
@@ -997,23 +1013,23 @@ def _confirm(prompt: str, default: bool = False) -> bool:
         return ans in ("y", "yes")
 
 
-def _pick_pricing_type(default: str = "hour") -> str:
+def _pick_pricing_type(default: str = "week") -> str:
+    choices = [
+        ("week",   "Weekly  (recommended — good discount)"),
+        ("month",  "Monthly (best discount)"),
+        ("minute", "Per-minute (flexible, no commitment)"),
+    ]
     try:
         from InquirerPy import inquirer
         return inquirer.select(
             message="Billing plan:",
-            choices=[
-                {"name": "Per minute (most flexible)", "value": "minute"},
-                {"name": "Per hour",                   "value": "hour"},
-                {"name": "Per day",                    "value": "day"},
-                {"name": "Per week  (cheaper)",        "value": "week"},
-                {"name": "Per month (cheapest)",       "value": "month"},
-            ],
+            choices=[{"name": label, "value": val} for val, label in choices],
             default=default,
         ).execute()
     except ImportError:
-        ans = input(f"Billing plan [minute/hour/day/week/month] (default {default}): ").strip().lower()
-        return ans if ans in ("minute", "hour", "day", "week", "month") else default
+        allowed = [val for val, _ in choices]
+        ans = input(f"Billing plan [{'/'.join(allowed)}] (default {default}): ").strip().lower()
+        return ans if ans in allowed else default
 
 
 def _place_order_with_retry(
@@ -1227,7 +1243,8 @@ def cmd_replace(args):
         print()
 
         if not _confirm(
-            f"Stop #{info['id']} and start the new GPU? This terminates the current machine.",
+            f"Destroy #{info['id']} and start the new GPU? "
+            "This permanently removes the old instance.",
             default=False,
         ):
             if _confirm("Pick a different replacement GPU?", default=True):
@@ -1235,9 +1252,9 @@ def cmd_replace(args):
             print("[gg] Cancelled.")
             return
 
-        print(f"[gg] Stopping #{info['id']}…")
-        if not api.stop_instance(info["id"]):
-            print("[gg] Could not stop old instance — aborting before placing new order.", file=sys.stderr)
+        print(f"[gg] Destroying #{info['id']}…")
+        if not api.delete_instance(info["id"]):
+            print("[gg] Could not destroy old instance — aborting before placing new order.", file=sys.stderr)
             sys.exit(1)
 
         print("[gg] Provisioning replacement…")
@@ -1252,7 +1269,7 @@ def cmd_replace(args):
             )
         except OrderOfferGone as e:
             print(f"[gg] Offer gone — {e.message}")
-            print("[gg] Old instance already stopped. Renting a different GPU…")
+            print("[gg] Old instance already destroyed. Renting a different GPU…")
             # Old instance is already stopped; we need to place SOMETHING or leave the user
             # without a GPU. Let them pick another offer with the same plan + volume.
             while True:
@@ -1277,7 +1294,7 @@ def cmd_replace(args):
 
         if not result:
             print(
-                "[gg] Replacement order failed. Old instance is already stopped — "
+                "[gg] Replacement order failed. Old instance is already destroyed — "
                 "rent manually with: gg rent",
                 file=sys.stderr,
             )
@@ -1397,8 +1414,8 @@ def main():
                              choices=["price-low", "price-high", "reliability", "vram", "performance"],
                              help="Sort order (default price-low)")
     rent_parser.add_argument("--pricing", default=None,
-                             choices=["minute", "hour", "day", "week", "month"],
-                             help="Billing plan (skip interactive prompt)")
+                             choices=["minute", "week", "month"],
+                             help="Billing plan — default 'week' (skip interactive prompt)")
     rent_parser.add_argument("--volume-id", default=None, dest="volume_id",
                              help="Attach this existing volume (skip prompt)")
     rent_parser.add_argument("--no-volume", action="store_true", dest="no_volume",

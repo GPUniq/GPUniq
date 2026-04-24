@@ -62,14 +62,18 @@ PAGE_SIZE = 15
 MIN_WIDTH = 100
 
 # Mirror of frontend/src/lib/image-presets.ts — keep in sync.
-IMAGE_PRESETS: List[Tuple[str, str, str, Optional[int]]] = [
-    # (id, display name, docker image, suggested disk GB)
-    ("pytorch", "PyTorch  (default)",        "vastai/pytorch:cuda-12.9.1-auto",                    None),
-    ("comfy",   "ComfyUI",                   "vastai/comfy:v0.18.2-cuda-12.9-py312",               20),
-    ("vllm",    "vLLM",                      "vastai/vllm:v0.19.0-cuda-12.9",                      32),
-    ("ubuntu",  "Ubuntu VM  (KVM)",          "docker.io/vastai/kvm:ubuntu_desktop_22.04-2025-11-21", 130),
+IMAGE_PRESETS: List[Tuple[str, str, str, str, Optional[int]]] = [
+    # (id, display name, description, docker image, suggested disk GB)
+    ("pytorch", "PyTorch",    "ML framework with CUDA + Jupyter",
+        "vastai/pytorch:cuda-12.9.1-auto", None),
+    ("comfy",   "ComfyUI",    "Stable Diffusion / FLUX.1 GUI",
+        "vastai/comfy:v0.18.2-cuda-12.9-py312", 20),
+    ("vllm",    "vLLM",       "High-throughput LLM serving",
+        "vastai/vllm:v0.19.0-cuda-12.9", 32),
+    ("ubuntu",  "Ubuntu VM",  "Full Ubuntu 22.04 desktop (KVM)",
+        "docker.io/vastai/kvm:ubuntu_desktop_22.04-2025-11-21", 130),
 ]
-DEFAULT_IMAGE = IMAGE_PRESETS[0][2]
+DEFAULT_IMAGE = IMAGE_PRESETS[0][3]
 
 
 def pick_docker_image(default_image: Optional[str] = None) -> Tuple[str, Optional[int]]:
@@ -83,40 +87,41 @@ def pick_docker_image(default_image: Optional[str] = None) -> Tuple[str, Optiona
 
     default_id = "pytorch"
     if default_image:
-        for pid, _label, img, _disk in IMAGE_PRESETS:
+        for pid, _label, _desc, img, _disk in IMAGE_PRESETS:
             if img == default_image:
                 default_id = pid
                 break
 
+    # Template names only — raw image strings are hidden from the user.
+    # Pad the label column so descriptions line up.
+    label_width = max(len(label) for _, label, *_ in IMAGE_PRESETS) + 2
     choices = [
-        {"name": f"{label}  —  {img}", "value": pid}
-        for pid, label, img, _disk in IMAGE_PRESETS
+        {"name": f"{label:<{label_width}} — {desc}", "value": pid}
+        for pid, label, desc, _img, _disk in IMAGE_PRESETS
     ]
-    choices.append({"name": "Custom image…  (type your own)", "value": "__custom__"})
-    if default_image and default_image not in {img for _, _, img, _ in IMAGE_PRESETS}:
-        # Allow re-using the previous instance's image verbatim (for replace flow).
-        choices.insert(0, {
-            "name": f"Use current:  {default_image}",
-            "value": "__current__",
-        })
+    choices.append({"name": "Custom image…", "value": "__custom__"})
+
+    preset_images = {img for _, _, _, img, _ in IMAGE_PRESETS}
+    if default_image and default_image not in preset_images:
+        choices.insert(0, {"name": "Keep current image", "value": "__current__"})
         default_id = "__current__"
 
     picked = inquirer.select(
-        message="Docker image:",
+        message="Template:",
         choices=choices,
         default=default_id,
     ).execute()
 
     if picked == "__custom__":
         text = inquirer.text(
-            message="Docker image (e.g. 'vastai/pytorch:cuda-12.9.1-auto'):",
+            message="Custom image tag:",
             default=default_image or DEFAULT_IMAGE,
         ).execute()
         return (text or DEFAULT_IMAGE).strip(), None
     if picked == "__current__":
         return default_image or DEFAULT_IMAGE, None
 
-    for pid, _label, img, disk in IMAGE_PRESETS:
+    for pid, _label, _desc, img, disk in IMAGE_PRESETS:
         if pid == picked:
             return img, disk
     return DEFAULT_IMAGE, None
@@ -253,17 +258,16 @@ class RentFlow:
         self.sort_by = self._ask_sort(inquirer)
 
     def _wizard_gpu(self, inquirer) -> Optional[str]:
-        choices = [{"name": label, "value": val} for val, label in GPU_PRESETS]
-        choices.append({"name": "Other (type model name…)", "value": "__other__"})
-        picked = inquirer.select(
-            message="GPU model:",
-            choices=self._pad_choices(choices),
-            default="",
-        ).execute()
-        if picked == "__other__":
-            text = inquirer.text(message="GPU model (e.g. 'RTX 6000'):").execute()
+        from gpuniq.cli.gpu_matrix import pick_gpu_matrix
+        picked = pick_gpu_matrix(default=self.gpu_model)
+        if picked == "__custom__":
+            text = inquirer.text(message="GPU model (e.g. 'RTX 6000 Ada'):").execute()
             return (text or "").strip() or None
-        return picked or None
+        if picked == "" or picked is None:
+            # "" = Any GPU chosen; None = picker cancelled or unsupported.
+            # Either way we treat it as "no filter".
+            return None
+        return picked
 
     def _wizard_count(self, inquirer) -> Optional[int]:
         choices = [{"name": label, "value": val} for val, label in COUNT_PRESETS]

@@ -139,7 +139,7 @@ class ClientAPI:
             return False
 
     def stop_instance(self, task_id: int) -> Optional[dict]:
-        """Stop a running instance."""
+        """Stop a running instance (leaves it terminable later)."""
         try:
             resp = self.session.post(
                 f"{self.base_url}/instances/{task_id}/stop",
@@ -149,6 +149,37 @@ class ClientAPI:
             return resp.json().get("data", {})
         except Exception as e:
             print(f"[gg] Error: could not stop instance: {e}", file=sys.stderr)
+            return None
+
+    def delete_instance(self, task_id: int) -> bool:
+        """Fully destroy an instance — terminates the provider machine, releases
+        the SSH proxy port, and soft-deletes the task. Use this for `gg replace`
+        where we never want the old instance back."""
+        try:
+            resp = self.session.delete(
+                f"{self.base_url}/instances/{task_id}",
+                timeout=60,
+            )
+            resp.raise_for_status()
+            return True
+        except Exception as e:
+            print(f"[gg] Error: could not delete instance: {e}", file=sys.stderr)
+            return False
+
+    def ensure_ssh_proxy(self, task_id: int) -> Optional[dict]:
+        """Ensure the instance has an SSH proxy (ssh.gpuniq.com) allocated.
+        Returns {ssh_host, ssh_port, ssh_username} on success, None on failure
+        (caller should fall back to direct IP)."""
+        try:
+            resp = self.session.post(
+                f"{self.base_url}/instances/{task_id}/ssh-proxy/ensure",
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json().get("data", {})
+        except Exception:
+            # Endpoint may not be deployed yet or the task may not support proxy —
+            # silently fall back to whatever SSH info is already on the instance.
             return None
 
     # ─── SSH Keys (account-level) ────────────────────────────────────────────
