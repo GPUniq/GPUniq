@@ -86,7 +86,7 @@ for agent in gpus["agents"]:
 order = client.marketplace.create_order(
     agent_id=gpus["agents"][0]["id"],
     pricing_type="week",
-    docker_image="vastai/pytorch:cuda-12.9.1-auto",
+    docker_image="pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime",
     ssh_key_ids=[1],
     disk_gb=100,
     volume_id=9,
@@ -351,7 +351,7 @@ Opens a full-width interactive flow:
 Flags (skip any prompt):
 ```bash
 gg rent --gpu "RTX 4090" --count 1 --pricing week \
-        --image vastai/pytorch:cuda-12.9.1-auto \
+        --image pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime \
         --disk 100 --max-price 1.50 --verified
 ```
 
